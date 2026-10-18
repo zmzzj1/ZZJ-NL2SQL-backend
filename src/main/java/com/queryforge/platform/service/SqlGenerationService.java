@@ -27,24 +27,31 @@ public class SqlGenerationService {
     private final LlmProperties properties;
     private final LlmClient llmClient;
     private final ObjectMapper objectMapper;
+    private final ConnectionService connectionService;
 
-    public SqlGenerationService(LlmProperties properties, LlmClient llmClient, ObjectMapper objectMapper) {
+    public SqlGenerationService(
+            LlmProperties properties,
+            LlmClient llmClient,
+            ObjectMapper objectMapper,
+            ConnectionService connectionService) {
         this.properties = properties;
         this.llmClient = llmClient;
         this.objectMapper = objectMapper;
+        this.connectionService = connectionService;
     }
 
     /**
      * 在写入 SSE 响应之前完成配置与上游连接检查；失败时仍可返回标准 JSON 错误。
      */
-    public PreparedGeneration prepare(GenerateSqlRequest request, String requestId) {
+    public PreparedGeneration prepare(GenerateSqlRequest request, Long userId, String requestId) {
         if (!properties.configured()) {
             throw new ApiException(
                     ErrorCode.MODEL_NOT_CONFIGURED,
                     HttpStatus.SERVICE_UNAVAILABLE,
                     "模型服务未配置：请在服务端设置 LLM_API_KEY");
         }
-        LlmStream stream = llmClient.open(request.userInput().trim(), request.schemaContext());
+        String schemaContext = connectionService.schemaContext(userId, request.connectionId());
+        LlmStream stream = llmClient.open(request.userInput().trim(), schemaContext);
         return new PreparedGeneration(requestId, stream);
     }
 

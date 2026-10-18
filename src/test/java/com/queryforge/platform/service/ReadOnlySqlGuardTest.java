@@ -3,7 +3,6 @@ package com.queryforge.platform.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.queryforge.platform.config.SqlLimits;
 import com.queryforge.platform.exception.ApiException;
 import com.queryforge.platform.exception.ErrorCode;
 import org.junit.jupiter.api.DisplayName;
@@ -14,26 +13,26 @@ import org.junit.jupiter.params.provider.ValueSource;
 @DisplayName("只读 SQL 结构校验")
 class ReadOnlySqlGuardTest {
 
-    private final ReadOnlySqlGuard guard = new ReadOnlySqlGuard(new SqlLimits(200, 5, "sql_demo"));
+    private final ReadOnlySqlGuard guard = new ReadOnlySqlGuard();
 
     @Test
     @DisplayName("合法 SELECT 通过并去掉尾部分号")
     void validate_shouldAcceptSelect_whenSingleReadOnlyStatement() {
-        assertThat(guard.validate("SELECT COUNT(*) AS total FROM demo_orders;"))
+        assertThat(guard.validate("SELECT COUNT(*) AS total FROM demo_orders;", "sql_demo_a"))
                 .isEqualTo("SELECT COUNT(*) AS total FROM demo_orders");
     }
 
     @Test
     @DisplayName("允许带库名限定与 CTE 的只读查询")
     void validate_shouldAcceptQualifiedTableAndCte() {
-        assertThat(guard.validate("SELECT * FROM sql_demo.demo_orders")).isNotBlank();
+        assertThat(guard.validate("SELECT * FROM sql_demo_a.shop_orders", "sql_demo_a")).isNotBlank();
         assertThat(guard.validate("""
                 WITH monthly AS (
                     SELECT DATE_FORMAT(created_at, '%Y-%m') AS month, SUM(amount) AS total
                     FROM demo_orders GROUP BY DATE_FORMAT(created_at, '%Y-%m')
                 )
                 SELECT * FROM monthly
-                """)).isNotBlank();
+                """, "sql_demo_a")).isNotBlank();
     }
 
     @ParameterizedTest
@@ -52,7 +51,7 @@ class ReadOnlySqlGuardTest {
     })
     @DisplayName("写操作、多语句、系统库、延时函数与加锁查询均被拒绝")
     void validate_shouldRejectUnsafeSql(String sql) {
-        assertThatThrownBy(() -> guard.validate(sql))
+        assertThatThrownBy(() -> guard.validate(sql, "sql_demo_a"))
                 .isInstanceOfSatisfying(ApiException.class, ex ->
                         assertThat(ex.getErrorCode()).isEqualTo(ErrorCode.SQL_NOT_ALLOWED));
     }
@@ -60,7 +59,7 @@ class ReadOnlySqlGuardTest {
     @Test
     @DisplayName("空 SQL 被拒绝")
     void validate_shouldRejectBlankSql() {
-        assertThatThrownBy(() -> guard.validate("   "))
+        assertThatThrownBy(() -> guard.validate("   ", "sql_demo_a"))
                 .isInstanceOfSatisfying(ApiException.class, ex ->
                         assertThat(ex.getErrorCode()).isEqualTo(ErrorCode.SQL_NOT_ALLOWED));
     }
@@ -68,7 +67,7 @@ class ReadOnlySqlGuardTest {
     @Test
     @DisplayName("字符串字面量中的关键字不会导致误判")
     void validate_shouldNotRejectKeywordsInsideLiterals() {
-        assertThat(guard.validate("SELECT 'DROP TABLE demo_orders' AS note FROM demo_orders"))
+        assertThat(guard.validate("SELECT 'DROP TABLE demo_orders' AS note FROM demo_orders", "sql_demo_a"))
                 .isNotBlank();
     }
 }

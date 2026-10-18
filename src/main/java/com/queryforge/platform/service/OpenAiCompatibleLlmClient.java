@@ -88,7 +88,9 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
     }
 
     private String buildRequestBody(String userInput, String schemaContext) {
-        String effectiveSchema = (schemaContext == null || schemaContext.isBlank()) ? DemoSchema.TEXT : schemaContext;
+        String effectiveSchema = (schemaContext == null || schemaContext.isBlank())
+                ? "（未提供可用的表结构）"
+                : schemaContext;
         ObjectNode root = objectMapper.createObjectNode();
         root.put("model", properties.model());
         root.put("stream", true);
@@ -97,7 +99,7 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         ArrayNode messages = root.putArray("messages");
         messages.addObject().put("role", "system").put("content", SYSTEM_PROMPT);
         messages.addObject().put("role", "user").put("content", """
-                可用 Schema（演示库，只读）：
+                当前连接数据库的 Schema（只读）：
                 %s
 
                 用户问题：

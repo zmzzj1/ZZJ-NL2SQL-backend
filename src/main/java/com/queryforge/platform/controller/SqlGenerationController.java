@@ -2,11 +2,13 @@ package com.queryforge.platform.controller;
 
 import com.queryforge.platform.config.RequestIdFilter;
 import com.queryforge.platform.dto.GenerateSqlRequest;
+import com.queryforge.platform.security.AppUserPrincipal;
 import com.queryforge.platform.service.SqlGenerationService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -30,10 +32,11 @@ public class SqlGenerationController {
 
     @PostMapping("/generate/stream")
     public ResponseEntity<StreamingResponseBody> generate(
+            @AuthenticationPrincipal AppUserPrincipal principal,
             @Valid @RequestBody GenerateSqlRequest request,
             HttpServletRequest httpRequest) {
         String requestId = RequestIdFilter.current(httpRequest);
-        SqlGenerationService.PreparedGeneration prepared = service.prepare(request, requestId);
+        SqlGenerationService.PreparedGeneration prepared = service.prepare(request, principal.id(), requestId);
 
         StreamingResponseBody body = outputStream -> service.writeStream(prepared, outputStream);
         return ResponseEntity.ok()

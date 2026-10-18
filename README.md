@@ -1,107 +1,112 @@
-# QueryForge 后端（SQL 平台）
+# QueryForge 后端（真实用户与多数据源）
 
-Java 21 + Spring Boot 3.5.6 + Maven Wrapper。提供健康检查、SSE 流式 SQL 生成、只读 SQL 执行。
+Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、Schema 读取、SSE SQL 生成与按数据源只读执行。
 
 ## 环境要求
 
 - JDK 21（验证使用 Temurin 21.0.12.1）
+- Maven 3.9+（验证使用 3.9.1）
 - MySQL 8（验证使用 8.4.11）
-- 可选：OpenAI 兼容模型服务（DeepSeek/OpenAI 等）
+- 可选：OpenAI 兼容模型服务
 
-## 初始化演示库
+## 数据库初始化
 
 ```bash
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/01-demo-schema.sql
+# 管理库：用户与连接配置
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/02-management-schema.sql
+
+# 两个隔离测试库：sql_demo_a(shop_*) / sql_demo_b(blog_*)
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/03-test-databases.sql
 ```
 
-创建只读账号（密码自行替换）：
+创建账号（密码由本地管理员设置，不提交仓库）：
 
 ```sql
-CREATE USER IF NOT EXISTS 'demo_reader'@'127.0.0.1' IDENTIFIED BY '<local-password>';
-GRANT SELECT ON sql_demo.* TO 'demo_reader'@'127.0.0.1';
+CREATE USER 'platform_app'@'127.0.0.1' IDENTIFIED BY '<management-password>';
+GRANT ALL PRIVILEGES ON sql_platform.* TO 'platform_app'@'127.0.0.1';
+CREATE USER 'demo_a_reader'@'127.0.0.1' IDENTIFIED BY '<a-reader-password>';
+GRANT SELECT ON sql_demo_a.* TO 'demo_a_reader'@'127.0.0.1';
+CREATE USER 'demo_b_reader'@'127.0.0.1' IDENTIFIED BY '<b-reader-password>';
+GRANT SELECT ON sql_demo_b.* TO 'demo_b_reader'@'127.0.0.1';
 FLUSH PRIVILEGES;
 ```
 
-演示数据固定为 3 条订单、3 个客户、4 条明细；`COUNT(*)` 返回 3。
-
 ## 配置
 
-```bash
-cp .env.example config/local.properties
-```
-
-`config/local.properties` 已被 `.gitignore` 排除。最少需要：
+参考 `.env.example`，通过本机环境变量或外部 Spring 配置提供以下值：
 
 ```properties
-spring.datasource.url=jdbc:mysql://127.0.0.1:3306/sql_demo?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowMultiQueries=false
-spring.datasource.username=demo_reader
-spring.datasource.password=<local-password>
+MANAGEMENT_DB_URL=jdbc:mysql://127.0.0.1:3306/sql_platform?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowMultiQueries=false
+MANAGEMENT_DB_USERNAME=platform_app
+MANAGEMENT_DB_PASSWORD=<management-password>
+APP_ENCRYPTION_KEY=<base64-32-bytes>
 ```
 
-模型配置可用环境变量覆盖：
+生成加密密钥：`openssl rand -base64 32`。该密钥必须与数据库分开保管。
+
+环境变量：
 
 | 变量 | 说明 |
 | --- | --- |
-| `LLM_BASE_URL` | OpenAI 兼容地址，默认 `https://api.deepseek.com/v1` |
-| `LLM_API_KEY` | 服务端密钥；为空时生成接口返回 `503 MODEL_NOT_CONFIGURED` |
-| `LLM_MODEL` | 模型名，默认 `deepseek-chat` |
-| `LLM_REQUEST_TIMEOUT` | 建连/响应头超时，默认 `60s` |
-| `SQL_MAX_ROWS` | 最大返回行数，默认 200 |
-| `SQL_QUERY_TIMEOUT_SECONDS` | 查询超时，默认 5 |
-| `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | 覆盖数据源配置 |
+| `MANAGEMENT_DB_URL/USERNAME/PASSWORD` | 覆盖管理库 |
+| `APP_ENCRYPTION_KEY` | 连接密码加密密钥（32 字节 Base64） |
+| `CONNECTION_ALLOWED_HOSTS` | 允许连接的主机，默认 `127.0.0.1,localhost` |
+| `CONNECTION_ALLOWED_PORTS` | 允许连接的端口，默认 `3306,3307,3308,3309,3310` |
+| `LLM_BASE_URL/API_KEY/MODEL` | 模型配置；无 Key 时生成返回 503 |
+| `SQL_MAX_ROWS` / `SQL_QUERY_TIMEOUT_SECONDS` | 行数/超时限制 |
 
 ## 启动与测试
 
 ```powershell
 $env:JAVA_HOME = 'D:\dev\tools\jdk-21.0.12.1+1'
-$env:Path = "$env:JAVA_HOME\bin;$env:Path"
 mvn verify
 mvn spring-boot:run
 ```
 
-默认监听 `127.0.0.1:8080`。健康检查：
-
-```powershell
-curl.exe --noproxy "*" http://127.0.0.1:8080/api/health
-# {"status":"UP"}
-```
+健康检查：`GET http://127.0.0.1:8080/api/health`。
 
 ## 接口
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/health` | `{"status":"UP"}` |
-| POST | `/api/v1/sql/generate/stream` | SSE：`start` / `delta` / `complete` / `error` |
-| POST | `/api/v1/sql/execute` | 单条只读 SELECT，返回 `columns/rows/rowCount/truncated` |
-
-错误体统一为 `{"code","message","requestId"}`，不包含堆栈、连接串或密钥。
+| POST | `/api/v1/auth/register` | 注册（BCrypt） |
+| POST | `/api/v1/auth/login` | 登录，建立 Session |
+| GET | `/api/v1/auth/me` | 当前用户 |
+| POST | `/api/v1/auth/logout` | 注销 |
+| GET | `/api/v1/auth/csrf` | CSRF Token |
+| GET/POST | `/api/v1/connections` | 本人连接列表/新增 |
+| PATCH/DELETE | `/api/v1/connections/{id}` | 修改/删除 |
+| POST | `/api/v1/connections/{id}/test` | 真实连通性测试 |
+| GET | `/api/v1/connections/{id}/schema` | JDBC 元数据 |
+| POST | `/api/v1/sql/generate/stream` | SSE，`connectionId` 决定 Schema |
+| POST | `/api/v1/sql/execute` | 只读执行，`connectionId + sql` |
 
 ## 安全边界
 
-- 只允许单条 `SELECT`；JSqlParser 结构校验 + 关键字/函数/系统库检查。
-- 数据库账号只有 `SELECT` 权限；Hikari 连接为只读并执行 `SET SESSION TRANSACTION READ ONLY`。
-- 最大 200 行、查询超时默认 5s；`truncated` 如实返回。
-- 模型输出不会自动执行，必须由用户显式调用执行接口。
-- 前端不能传 JDBC URL、账号或密码。
+- Spring Security Session + HttpOnly Cookie + CSRF（`X-XSRF-TOKEN`）。
+- 连接密码 AES-256-GCM 加密，接口不返回密码/密文；密钥独立配置。
+- 主机/端口白名单，数据库名/用户名只允许安全标识符；不接受任意 JDBC URL。
+- 所有连接查询带 `user_id`；跨用户资源统一 404。
+- SQL 执行：JSqlParser + 危险函数/系统库/跨库拒绝 + 只读账号 + `SET SESSION TRANSACTION READ ONLY` + 行数/超时。
+- 模型输出不会自动执行，必须用户显式提交。
 
 ## 本地模型测试桩
-
-没有真实模型凭据时，可用测试桩验证 HTTP/SSE 协议（不是真实模型）：
 
 ```bash
 node tools/llm-stub.mjs 9099
 # 另开终端
-$env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; .\mvnw.cmd spring-boot:run
+$env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn spring-boot:run
 ```
 
-输入包含“触发上游错误”可模拟上游 500；包含“慢速”可放慢输出，便于验证取消。
+测试桩按服务端注入的 Schema 返回 `shop_orders` 或 `blog_posts` 查询；不是真实模型。
 
-## 结构
+## 测试
 
-采用 `controller / service / repository / dto / exception / config` 分层。
+- `mvn verify`：47 个自动化用例，包含 Controller 切片与 Service 单元测试。
 
 ## 已知限制
 
-- 真实 LLM 调用尚未用有效凭据验收；无 Key 时按契约失败，不伪造结果。
-- 上游连接后长时间不返回数据的读取超时未独立测试。
-- 未引入 Redis、JPA、Testcontainers：当前无对应业务需求。
+- 真实 LLM 未验证（无 Key）。
+- 仅 MySQL；PostgreSQL 明确拒绝。
+- 目标连接按请求建立，未池化；高并发未压测。
+- Session 存内存，重启后需重新登录；连接配置持久化。

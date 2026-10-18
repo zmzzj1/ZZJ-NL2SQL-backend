@@ -1,6 +1,5 @@
 package com.queryforge.platform.service;
 
-import com.queryforge.platform.config.SqlLimits;
 import com.queryforge.platform.exception.ApiException;
 import com.queryforge.platform.exception.ErrorCode;
 import java.util.Locale;
@@ -30,17 +29,12 @@ public class ReadOnlySqlGuard {
     private static final Pattern SYSTEM_SCHEMA = Pattern.compile(
             "\\b(information_schema|performance_schema|mysql|sys)\\s*\\.", Pattern.CASE_INSENSITIVE);
 
-    private final SqlLimits limits;
-
-    public ReadOnlySqlGuard(SqlLimits limits) {
-        this.limits = limits;
-    }
-
     /**
+     * @param allowedSchema 当前选中连接对应的数据库名
      * @return 去掉尾部空白与分号后的可执行 SQL
      * @throws ApiException 不符合只读约束时抛出 SQL_NOT_ALLOWED
      */
-    public String validate(String rawSql) {
+    public String validate(String rawSql, String allowedSchema) {
         if (rawSql == null || rawSql.isBlank()) {
             throw reject("SQL 不能为空");
         }
@@ -79,11 +73,11 @@ public class ReadOnlySqlGuard {
             throw reject("不允许访问系统库");
         }
 
-        assertOnlyAllowedSchema(sql);
+        assertOnlyAllowedSchema(sql, allowedSchema);
         return sql;
     }
 
-    private void assertOnlyAllowedSchema(String sql) {
+    private void assertOnlyAllowedSchema(String sql, String allowedSchema) {
         Set<String> tables;
         try {
             tables = TablesNamesFinder.findTables(sql);
@@ -95,8 +89,8 @@ public class ReadOnlySqlGuard {
             String[] parts = normalized.split("\\.");
             if (parts.length >= 2) {
                 String schema = parts[parts.length - 2];
-                if (!limits.allowedSchema().equalsIgnoreCase(schema)) {
-                    throw reject("只允许查询演示库 " + limits.allowedSchema());
+                if (!allowedSchema.equalsIgnoreCase(schema)) {
+                    throw reject("只允许查询当前连接的库 " + allowedSchema);
                 }
             }
         }

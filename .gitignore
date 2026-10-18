@@ -13,3 +13,6 @@ logs/
 P0-B01-backend-v0-development-guide*.md
 docs/structure-decision.md
 docs/P0-B01-acceptance.md
+docs/*-acceptance.md
+docs/*-development-guide*.md
+docs/evidence/

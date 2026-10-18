@@ -1,6 +1,9 @@
 package com.queryforge.platform.repository;
 
 import com.queryforge.platform.dto.QueryResultResponse;
+import com.queryforge.platform.entity.ConnectionTarget;
+import com.queryforge.platform.exception.TargetConnectionException;
+import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
@@ -15,37 +18,33 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.ResultSetExtractor;
 import org.springframework.stereotype.Repository;
 
 /**
- * 演示库的只读查询入口。动态结果集的列由 SQL 决定，
- * 因此 rows 使用「列名 -> 值」的有序映射，顺序与 columns 一致。
+ * 在用户选中的只读连接上执行单条查询。每次请求独立建连，不跨用户复用连接。
  */
 @Repository
-public class DemoQueryRepository {
+public class TargetQueryRepository {
 
     private static final DateTimeFormatter DATE_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    private final JdbcTemplate jdbcTemplate;
+    private final TargetConnectionFactory connectionFactory;
 
-    public DemoQueryRepository(JdbcTemplate jdbcTemplate) {
-        this.jdbcTemplate = jdbcTemplate;
+    public TargetQueryRepository(TargetConnectionFactory connectionFactory) {
+        this.connectionFactory = connectionFactory;
     }
 
-    public QueryResultResponse query(String sql, int maxRows, int queryTimeoutSeconds) {
-        ResultSetExtractor<QueryResultResponse> extractor = resultSet -> extract(resultSet, maxRows);
-        return jdbcTemplate.query(
-                connection -> {
-                    PreparedStatement statement = connection.prepareStatement(
-                            sql, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
-                    // 多取一行用于判断是否发生截断，返回给调用方前再裁掉。
-                    statement.setMaxRows(maxRows + 1);
-                    statement.setQueryTimeout(queryTimeoutSeconds);
-                    return statement;
-                },
-                extractor);
+    public QueryResultResponse query(
+            ConnectionTarget target, String sql, int maxRows, int queryTimeoutSeconds) throws SQLException {
+        try (Connection connection = connectionFactory.open(target);
+             PreparedStatement statement = connection.prepareStatement(
+                     sql, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY)) {
+            statement.setMaxRows(maxRows + 1);
+            statement.setQueryTimeout(queryTimeoutSeconds);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return extract(resultSet, maxRows);
+            }
+        }
     }
 
     private static QueryResultResponse extract(ResultSet resultSet, int maxRows) throws SQLException {

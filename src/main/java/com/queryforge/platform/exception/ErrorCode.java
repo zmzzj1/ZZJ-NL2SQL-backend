@@ -5,6 +5,11 @@ package com.queryforge.platform.exception;
  */
 public enum ErrorCode {
     VALIDATION_ERROR,
+    UNAUTHENTICATED,
+    FORBIDDEN,
+    DUPLICATE_EMAIL,
+    CONNECTION_NOT_FOUND,
+    CONNECTION_FAILED,
     SQL_NOT_ALLOWED,
     SQL_EXECUTION_ERROR,
     MODEL_NOT_CONFIGURED,
