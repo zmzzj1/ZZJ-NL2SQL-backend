@@ -54,8 +54,9 @@ spring.datasource.password=<local-password>
 
 ```powershell
 $env:JAVA_HOME = 'D:\dev\tools\jdk-21.0.12.1+1'
-.\mvnw.cmd test
-.\mvnw.cmd spring-boot:run
+$env:Path = "$env:JAVA_HOME\bin;$env:Path"
+mvn verify
+mvn spring-boot:run
 ```
 
 默认监听 `127.0.0.1:8080`。健康检查：
@@ -97,7 +98,7 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; .\mvn
 
 ## 结构
 
-`controller / service / repository / dto / exception / config` 分层，决策与取舍见 `docs/structure-decision.md`，验收记录见 `docs/P0-B01-acceptance.md`。
+采用 `controller / service / repository / dto / exception / config` 分层。
 
 ## 已知限制
 
