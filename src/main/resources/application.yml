@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: queryforge-sql-platform
+  config:
+    import: optional:file:./config/local.properties
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/sql_demo?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowMultiQueries=false}
+    username: ${DB_USERNAME:demo_reader}
+    password: ${DB_PASSWORD:}
+    hikari:
+      maximum-pool-size: 5
+      minimum-idle: 1
+      read-only: true
+      connection-init-sql: SET SESSION TRANSACTION READ ONLY
+      connection-timeout: 5000
+  mvc:
+    async:
+      request-timeout: 120000
+
+server:
+  address: 127.0.0.1
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+app:
+  llm:
+    base-url: ${LLM_BASE_URL:https://api.deepseek.com/v1}
+    api-key: ${LLM_API_KEY:}
+    model: ${LLM_MODEL:deepseek-chat}
+    connect-timeout: ${LLM_CONNECT_TIMEOUT:10s}
+    request-timeout: ${LLM_REQUEST_TIMEOUT:60s}
+  sql:
+    max-rows: ${SQL_MAX_ROWS:200}
+    query-timeout-seconds: ${SQL_QUERY_TIMEOUT_SECONDS:5}
+    allowed-schema: ${SQL_ALLOWED_SCHEMA:sql_demo}
+
+logging:
+  level:
+    com.queryforge.platform: INFO
+    org.springframework.jdbc.core: WARN

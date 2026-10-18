@@ -1,0 +1,15 @@
+target/
+.mvn/wrapper/maven-wrapper.jar
+config/local.properties
+*.log
+logs/
+.idea/
+*.iml
+.vscode/
+
+# local WorkBuddy / agent artifacts
+.codebuddy/
+.workbuddy/
+P0-B01-backend-v0-development-guide*.md
+docs/structure-decision.md
+docs/P0-B01-acceptance.md
