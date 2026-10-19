@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.verify;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.queryforge.agent.AgentRunRepository;
 import com.queryforge.shared.error.ApiException;
 import com.queryforge.shared.error.ErrorCode;
 import java.util.List;
@@ -23,6 +24,9 @@ class ToolRegistryTest {
 
     @Mock
     private ToolInvocationRepository auditRepository;
+
+    @Mock
+    private AgentRunRepository agentRunRepository;
 
     private static Tool echoTool() {
         return new Tool() {
@@ -52,7 +56,7 @@ class ToolRegistryTest {
     }
 
     private ToolRegistry registry() {
-        return new ToolRegistry(List.of(echoTool()), auditRepository, new ObjectMapper());
+        return new ToolRegistry(List.of(echoTool()), auditRepository, new ObjectMapper(), agentRunRepository);
     }
 
     @Test

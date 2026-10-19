@@ -19,6 +19,10 @@ public record AgentRun(
         String errorCode,
         String errorMessage,
         LocalDateTime createdAt,
-        LocalDateTime updatedAt
+        LocalDateTime updatedAt,
+        Long agentId,
+        Long agentVersionId,
+        String resolvedSkillVersions,
+        String toolPolicyHash
 ) {
 }

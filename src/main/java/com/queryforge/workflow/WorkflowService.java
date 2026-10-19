@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.queryforge.agent.AgentSqlAssistant;
 import com.queryforge.analysis.AnalysisRunResponse;
 import com.queryforge.analysis.AnalysisService;
+import com.queryforge.config.ResolvedAgentConfig;
+import com.queryforge.config.RuntimeConfigResolver;
 import com.queryforge.datasource.ConnectionService;
 import com.queryforge.query.execution.ExecuteSqlRequest;
 import com.queryforge.query.execution.QueryResultResponse;
@@ -14,6 +16,7 @@ import com.queryforge.query.execution.SseEventWriter;
 import com.queryforge.report.ReportService;
 import com.queryforge.shared.error.ApiException;
 import com.queryforge.shared.error.ErrorCode;
+import com.queryforge.skill.SkillService;
 import com.queryforge.tool.ToolInvocation;
 import com.queryforge.tool.ToolRegistry;
 import java.io.IOException;
@@ -46,6 +49,8 @@ public class WorkflowService {
     private final AnalysisService analysisService;
     private final ReportService reportService;
     private final ToolRegistry toolRegistry;
+    private final RuntimeConfigResolver configResolver;
+    private final SkillService skillService;
 
     public WorkflowService(
             WorkflowRepository repository,
@@ -57,7 +62,9 @@ public class WorkflowService {
             SqlExecutionService executionService,
             AnalysisService analysisService,
             ReportService reportService,
-            ToolRegistry toolRegistry) {
+            ToolRegistry toolRegistry,
+            RuntimeConfigResolver configResolver,
+            SkillService skillService) {
         this.repository = repository;
         this.validator = validator;
         this.objectMapper = objectMapper;
@@ -68,6 +75,8 @@ public class WorkflowService {
         this.analysisService = analysisService;
         this.reportService = reportService;
         this.toolRegistry = toolRegistry;
+        this.configResolver = configResolver;
+        this.skillService = skillService;
     }
 
     public WorkflowResponse create(Long userId, WorkflowRequest request) {
@@ -108,15 +117,26 @@ public class WorkflowService {
         WorkflowGraph graph = parseGraph(workflow.definition());
         validator.validate(graph);
         connectionService.summary(userId, request.connectionId());
+        ResolvedAgentConfig config = resolveConfig(userId, request);
         Long runId = repository.insertRun(userId, workflowId, workflow.revision(),
-                request.conversationId(), request.connectionId());
+                request.conversationId(), request.connectionId(), config.agentId(), config.agentVersionId());
         List<WorkflowGraph.Node> order = validator.topoOrder(graph);
         int sequence = 0;
         for (WorkflowGraph.Node node : order) {
             repository.insertNode(runId, node.id(), node.type(), sequence++);
         }
         return new PreparedRun(runId, userId, workflowId, request.connectionId(),
-                request.conversationId(), request.userInput(), graph);
+                request.conversationId(), request.userInput(), graph, config);
+    }
+
+    private ResolvedAgentConfig resolveConfig(Long userId, StartWorkflowRunRequest request) {
+        if (request.agentVersionId() != null) {
+            return configResolver.resolvePublishedByVersion(userId, request.agentVersionId());
+        }
+        if (request.agentId() != null) {
+            return configResolver.resolvePublished(userId, request.agentId());
+        }
+        return ResolvedAgentConfig.defaults();
     }
 
     public void startRun(PreparedRun run, OutputStream outputStream) {
@@ -143,8 +163,20 @@ public class WorkflowService {
         if (run.status() != WorkflowStatus.Run.WAITING_APPROVAL) {
             throw new ApiException(ErrorCode.WORKFLOW_STATE_CONFLICT, HttpStatus.CONFLICT, "运行当前不在等待审批");
         }
+        ResolvedAgentConfig config = configOf(run);
         return new PreparedApproval(runId, userId, run.workflowId(), run.connectionId(),
-                run.conversationId(), nodeId, graph);
+                run.conversationId(), nodeId, graph, config);
+    }
+
+    /** 从 Run 固定的 agentVersionId 重新解析配置（版本不可变，暂停/恢复不随新发布切换）。 */
+    private ResolvedAgentConfig configOf(WorkflowRepository.WorkflowRun run) {
+        if (run.agentVersionId() != null) {
+            return configResolver.resolvePublishedByVersion(run.userId(), run.agentVersionId());
+        }
+        if (run.agentId() != null) {
+            return configResolver.resolvePublished(run.userId(), run.agentId());
+        }
+        return ResolvedAgentConfig.defaults();
     }
 
     public void executeApproval(PreparedApproval approval, OutputStream outputStream) {
@@ -168,7 +200,8 @@ public class WorkflowService {
 
             // 从批准节点之后继续推进
             PreparedRun continuation = new PreparedRun(approval.runId(), approval.userId(),
-                    approval.workflowId(), approval.connectionId(), approval.conversationId(), "", approval.graph());
+                    approval.workflowId(), approval.connectionId(), approval.conversationId(), "", approval.graph(),
+                    approval.config());
             repository.updateRunStatus(approval.runId(), WorkflowStatus.Run.RUNNING, null, null);
             runToCompletion(continuation, writer, node.nodeId());
         } catch (IOException ex) {
@@ -261,7 +294,9 @@ public class WorkflowService {
     private boolean executeSqlNode(PreparedRun run, WorkflowRepository.WorkflowNode node, SseEventWriter writer)
             throws IOException {
         String schema = connectionService.schemaContext(run.userId(), run.connectionId());
-        String sql = sqlAssistant.generateSql(run.userInput(), schema, "", "");
+        String skillGuidance = selectSkillGuidance(run, writer);
+        String customPrompt = run.config() == null ? "" : run.config().systemPrompt();
+        String sql = sqlAssistant.generateSql(run.userInput(), schema, "", "", customPrompt, skillGuidance);
         String validated = guard.validate(sql, database(run));
         if (validated.isBlank()) {
             throw new ApiException(ErrorCode.SQL_NOT_ALLOWED, HttpStatus.UNPROCESSABLE_ENTITY, "模型未生成可执行的 SQL");
@@ -272,6 +307,27 @@ public class WorkflowService {
         writer.event("node.waiting_approval", new WorkflowStreamEvents.NodeWaitingApproval(
                 run.runId(), node.nodeId(), validated));
         return true;
+    }
+
+    /** 按任务问题选择绑定的已发布 Skill 并渲染指引。 */
+    private String selectSkillGuidance(PreparedRun run, SseEventWriter writer) throws IOException {
+        ResolvedAgentConfig config = run.config();
+        if (config == null || config.skillVersionRefs().isEmpty()) {
+            return "";
+        }
+        List<SkillService.SkillRef> refs = config.skillVersionRefs().entrySet().stream()
+                .map(entry -> new SkillService.SkillRef(entry.getKey(), entry.getValue()))
+                .toList();
+        List<SkillService.SelectedSkill> selected = skillService.selectAndRender(
+                refs, run.userInput() == null ? "" : run.userInput(), null, 3);
+        if (selected.isEmpty()) {
+            return "";
+        }
+        StringBuilder guidance = new StringBuilder();
+        for (SkillService.SelectedSkill s : selected) {
+            guidance.append("【Skill v").append(s.versionNo()).append("】").append(s.renderedGuidance()).append("\n");
+        }
+        return guidance.toString();
     }
 
     private void executeAnalysisNode(PreparedRun run, WorkflowRepository.WorkflowNode node, SseEventWriter writer)
@@ -407,13 +463,13 @@ public class WorkflowService {
 
     public record PreparedRun(
             Long runId, Long userId, Long workflowId, Long connectionId, Long conversationId,
-            String userInput, WorkflowGraph graph
+            String userInput, WorkflowGraph graph, ResolvedAgentConfig config
     ) {
     }
 
     public record PreparedApproval(
             Long runId, Long userId, Long workflowId, Long connectionId, Long conversationId,
-            String nodeId, WorkflowGraph graph
+            String nodeId, WorkflowGraph graph, ResolvedAgentConfig config
     ) {
     }
 }

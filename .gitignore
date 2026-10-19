@@ -21,3 +21,5 @@ docs/evidence/
 tools/p6-acceptance.py
 tools/p6-e2e.py
 tools/p6-e2e-out/
+tools/p7-e2e.py
+tools/p7-e2e-out.json

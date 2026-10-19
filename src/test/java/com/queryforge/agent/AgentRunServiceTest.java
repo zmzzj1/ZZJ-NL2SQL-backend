@@ -4,6 +4,9 @@ import com.queryforge.datasource.ConnectionService;
 import com.queryforge.knowledge.KnowledgeService;
 import com.queryforge.query.execution.ReadOnlySqlGuard;
 import com.queryforge.query.execution.SqlExecutionService;
+import com.queryforge.config.ResolvedAgentConfig;
+import com.queryforge.config.RuntimeConfigResolver;
+import com.queryforge.skill.SkillService;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -90,6 +93,12 @@ class AgentRunServiceTest {
     @Mock
     private KnowledgeService knowledgeService;
 
+    @Mock
+    private RuntimeConfigResolver configResolver;
+
+    @Mock
+    private SkillService skillService;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private AgentRunService service;
 
@@ -98,7 +107,7 @@ class AgentRunServiceTest {
         service = new AgentRunService(
                 repository, conversationService, connectionService, planner, sqlAssistant,
                 executionService, guard, new AgentProperties(3, 2, 6000, 12), objectMapper,
-                managerRouter, knowledgeService);
+                managerRouter, knowledgeService, configResolver, skillService);
     }
 
     @Test
@@ -109,11 +118,12 @@ class AgentRunServiceTest {
         when(connectionService.summary(USER_ID, CONNECTION_ID))
                 .thenReturn(new ConnectionService.ConnectionSummary(CONNECTION_ID, "A 商店库", "sql_demo_a"));
         when(repository.insertRun(
-                USER_ID, CONVERSATION_ID, CONNECTION_ID, "A 商店库", QUESTION, RunStatus.PLANNING))
+                USER_ID, CONVERSATION_ID, CONNECTION_ID, "A 商店库", QUESTION, RunStatus.PLANNING,
+                null, null, "{}", "[]"))
                 .thenReturn(RUN_ID);
 
         AgentRunService.PreparedRun prepared = service.prepareStart(
-                USER_ID, new CreateAgentRunRequest(CONVERSATION_ID, CONNECTION_ID, QUESTION));
+                USER_ID, new CreateAgentRunRequest(CONVERSATION_ID, CONNECTION_ID, QUESTION, null, null, null));
 
         assertThat(prepared.runId()).isEqualTo(RUN_ID);
         assertThat(prepared.database()).isEqualTo("sql_demo_a");
@@ -125,7 +135,7 @@ class AgentRunServiceTest {
     @DisplayName("规划成功后展示计划并生成第一步 SQL，等待用户确认")
     void startRun_shouldEmitPlanAndFirstApproval() throws Exception {
         stubPlan(1);
-        when(sqlAssistant.generateSql(QUESTION, SCHEMA, "", "")).thenReturn(SQL);
+        when(sqlAssistant.generateSql(QUESTION, SCHEMA, "", "", "", "")).thenReturn(SQL);
         when(guard.validate(SQL, "sql_demo_a")).thenReturn(SQL);
 
         String output = start(prepared());
@@ -162,7 +172,7 @@ class AgentRunServiceTest {
     @DisplayName("生成期 SQL Guard 拒绝时步骤与运行都失败")
     void startRun_shouldFailWhenGuardRejects() throws Exception {
         stubPlan(1);
-        when(sqlAssistant.generateSql(QUESTION, SCHEMA, "", "")).thenReturn(SQL);
+        when(sqlAssistant.generateSql(QUESTION, SCHEMA, "", "", "", "")).thenReturn(SQL);
         when(guard.validate(SQL, "sql_demo_a")).thenThrow(
                 new ApiException(ErrorCode.SQL_NOT_ALLOWED, HttpStatus.BAD_REQUEST, "只允许只读 SELECT"));
 
@@ -185,7 +195,7 @@ class AgentRunServiceTest {
         when(sqlAssistant.summarize(eq(QUESTION), anyString())).thenReturn("订单总数为 3。");
 
         String output = approve(new AgentRunService.PreparedApproval(
-                USER_ID, run, waiting, false, "sql_demo_a"));
+                USER_ID, run, waiting, false, "sql_demo_a", ResolvedAgentConfig.defaults()));
 
         assertThat(output).contains("event: step.succeeded", "event: run.completed", "订单总数为 3。");
         verify(repository).updateRunStatus(RUN_ID, RunStatus.COMPLETED, "订单总数为 3。", null, null);
@@ -208,7 +218,7 @@ class AgentRunServiceTest {
         when(guard.validate(fixed, "sql_demo_a")).thenReturn(fixed);
 
         String output = approve(new AgentRunService.PreparedApproval(
-                USER_ID, run, waiting, false, "sql_demo_a"));
+                USER_ID, run, waiting, false, "sql_demo_a", ResolvedAgentConfig.defaults()));
 
         assertThat(output).contains("event: step.repairing", "event: step.sql_ready", "event: approval.required");
         verify(repository).setStepSql(STEP_ID, fixed, 2, 1);
@@ -226,7 +236,7 @@ class AgentRunServiceTest {
                         null, 0, false, new SQLException("timeout")));
 
         String output = approve(new AgentRunService.PreparedApproval(
-                USER_ID, run, waiting, false, "sql_demo_a"));
+                USER_ID, run, waiting, false, "sql_demo_a", ResolvedAgentConfig.defaults()));
 
         assertThat(output).contains("event: step.failed", "event: run.failed");
         verifyNoInteractions(sqlAssistant);
@@ -343,7 +353,8 @@ class AgentRunServiceTest {
     private static AgentRun run(RunStatus status) {
         return new AgentRun(
                 RUN_ID, USER_ID, CONVERSATION_ID, CONNECTION_ID, "A 商店库", QUESTION,
-                status, null, null, null, 0, null, null, null, NOW, NOW);
+                status, null, null, null, 0, null, null, null, NOW, NOW,
+                null, null, null, null);
     }
 
     private static AgentStep step(StepStatus status, String sql, int version, int repairCount) {

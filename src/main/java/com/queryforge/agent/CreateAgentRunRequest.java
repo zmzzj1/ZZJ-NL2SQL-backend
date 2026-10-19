@@ -14,6 +14,15 @@ public record CreateAgentRunRequest(
 
         @NotBlank(message = "userInput 不能为空")
         @Size(max = 2000, message = "userInput 最长 2000 字符")
-        String userInput
+        String userInput,
+
+        /** 可选：指定 Agent 配置（发布版优先）。缺省沿用内置默认行为。 */
+        Long agentId,
+
+        /** 可选：指定发布版本（用于追溯与回滚后固定版本）。缺省使用 Agent 当前发布版。 */
+        Long agentVersionId,
+
+        /** 可选：true 表示读取草稿快照（Studio 测试预览）；缺省 false 使用发布版。 */
+        Boolean draft
 ) {
 }

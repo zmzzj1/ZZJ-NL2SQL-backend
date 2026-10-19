@@ -67,4 +67,15 @@ public final class AgentStreamEvents {
 
     public record ClarifyRequired(Long runId, String message) {
     }
+
+    public record SkillSelectedView(Long skillId, Long skillVersionId, int versionNo) {
+    }
+
+    /** 记录本轮选中的 Skill 及其版本（不含模板全文）。 */
+    public record SkillSelected(Long runId, List<SkillSelectedView> skills) {
+    }
+
+    /** 记录本轮解析的 Agent 配置摘要（不含敏感提示词全文）。 */
+    public record ConfigResolved(Long runId, Long agentId, Long agentVersionId, boolean ragEnabled, boolean memoryEnabled) {
+    }
 }

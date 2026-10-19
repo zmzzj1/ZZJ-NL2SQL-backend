@@ -22,7 +22,7 @@ public class WorkflowRepository {
             """;
     private static final String RUN_COLUMNS = """
             id, user_id, workflow_id, workflow_revision, conversation_id, connection_id, status,
-            error_code, error_message, created_at, updated_at
+            error_code, error_message, created_at, updated_at, agent_id, agent_version_id
             """;
     private static final String NODE_COLUMNS = """
             id, workflow_run_id, node_id, node_type, sequence, status, agent_run_id, agent_step_id,
@@ -85,12 +85,18 @@ public class WorkflowRepository {
     }
 
     public Long insertRun(Long userId, Long workflowId, int revision, Long conversationId, Long connectionId) {
+        return insertRun(userId, workflowId, revision, conversationId, connectionId, null, null);
+    }
+
+    public Long insertRun(Long userId, Long workflowId, int revision, Long conversationId, Long connectionId,
+                          Long agentId, Long agentVersionId) {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbcTemplate.update(connection -> {
             PreparedStatement statement = connection.prepareStatement("""
                     INSERT INTO workflow_runs
-                        (user_id, workflow_id, workflow_revision, conversation_id, connection_id, status)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                        (user_id, workflow_id, workflow_revision, conversation_id, connection_id, status,
+                         agent_id, agent_version_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """, Statement.RETURN_GENERATED_KEYS);
             statement.setLong(1, userId);
             statement.setLong(2, workflowId);
@@ -98,6 +104,8 @@ public class WorkflowRepository {
             setNullableLong(statement, 4, conversationId);
             setNullableLong(statement, 5, connectionId);
             statement.setString(6, WorkflowStatus.Run.PENDING.name());
+            setNullableLong(statement, 7, agentId);
+            setNullableLong(statement, 8, agentVersionId);
             return statement;
         }, keyHolder);
         Number key = keyHolder.getKey();
@@ -206,7 +214,9 @@ public class WorkflowRepository {
                 resultSet.getString("error_code"),
                 resultSet.getString("error_message"),
                 resultSet.getTimestamp("created_at").toLocalDateTime(),
-                resultSet.getTimestamp("updated_at").toLocalDateTime());
+                resultSet.getTimestamp("updated_at").toLocalDateTime(),
+                nullable(resultSet, "agent_id"),
+                nullable(resultSet, "agent_version_id"));
     }
 
     private static WorkflowNode mapNode(java.sql.ResultSet resultSet) throws java.sql.SQLException {
@@ -242,7 +252,8 @@ public class WorkflowRepository {
     public record WorkflowRun(
             Long id, Long userId, Long workflowId, int workflowRevision,
             Long conversationId, Long connectionId, WorkflowStatus.Run status,
-            String errorCode, String errorMessage, LocalDateTime createdAt, LocalDateTime updatedAt
+            String errorCode, String errorMessage, LocalDateTime createdAt, LocalDateTime updatedAt,
+            Long agentId, Long agentVersionId
     ) {
     }
 

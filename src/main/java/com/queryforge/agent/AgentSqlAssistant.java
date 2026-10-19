@@ -23,12 +23,30 @@ public class AgentSqlAssistant {
     }
 
     public String generateSql(String objective, String schema, String previousSummaries, String knowledge) {
+        return generateSql(objective, schema, previousSummaries, knowledge, "", "");
+    }
+
+    /**
+     * 生成 SQL，支持 Agent 自定义系统提示词（追加在平台硬性安全指令之后，不覆盖）与
+     * 已选中的 Skill 指引（作为受控上下文注入，不授予任何权限）。
+     */
+    public String generateSql(String objective, String schema, String previousSummaries, String knowledge,
+                              String customSystemPrompt, String skillGuidance) {
+        String system = buildSqlSystem(customSystemPrompt);
         String raw = LlmTextCollector.collect(
                 llmClient.openChat(
-                        AgentPrompts.SQL_SYSTEM,
-                        AgentPrompts.sqlUser(objective, schema, previousSummaries, knowledge)),
+                        system,
+                        AgentPrompts.sqlUserWithGuidance(objective, schema, previousSummaries, knowledge, skillGuidance)),
                 objectMapper);
         return sanitizeSql(raw);
+    }
+
+    /** 平台安全指令始终保留；自定义提示词只作为补充，禁止覆盖只读/审批/工具权限约束。 */
+    private static String buildSqlSystem(String customSystemPrompt) {
+        if (customSystemPrompt == null || customSystemPrompt.isBlank()) {
+            return AgentPrompts.SQL_SYSTEM;
+        }
+        return AgentPrompts.SQL_SYSTEM + "\n\n补充要求（不得违反上述硬性安全约束）：\n" + customSystemPrompt;
     }
 
     public String knowledgeAnswer(String question, String knowledge) {

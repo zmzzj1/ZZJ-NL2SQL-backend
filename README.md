@@ -1,6 +1,6 @@
 # QueryForge 后端（真实用户与多数据源）
 
-Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索，以及 P6 新增的隔离数据分析、HTML 报告、MCP 工具接入和可视化工作流。
+Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流，以及 P7 新增的 Agent Studio、Skill Registry、Agent 配置管理、版本发布回滚与 Dashboard/Workflow 集成。
 
 ## 环境要求
 
@@ -19,6 +19,9 @@ Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL �
 - 隔离 Python 数据分析（Docker 沙箱，不可用时拒绝回退宿主机）、内置确定性分析器。
 - 结构化图表（table/bar/line/pie）与净化 HTML 报告（CSP + 沙箱预览）。
 - 可视化工作流 DAG（校验、版本化、串行执行、SQL 审批暂停/恢复、SSE）。
+- Agent Studio：草稿 CRUD、工具白名单、RAG/Memory 策略、Skill 绑定、发布不可变版本、回滚与审计。
+- Skill Registry：CRUD、不可变版本发布、模板白名单变量校验、运行时按相关性选择并注入。
+- 运行配置统一解析（`config/RuntimeConfigResolver`），配置真正影响 Manager/Agent Run/Tool Registry；Run 固定版本快照。
 
 ## 数据库初始化
 
@@ -34,6 +37,7 @@ mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/re
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/05-agent-runs.sql
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/06-knowledge-memory.sql
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/07-p6-tools-analysis-report-mcp-workflow.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/08-p7-agent-studio-skill.sql
 ```
 
 创建账号（密码由本地管理员设置，不提交仓库）：
@@ -117,7 +121,9 @@ mvn spring-boot:run
 | POST/GET/DELETE | `/api/v1/reports`、`/api/v1/reports/{id}`、`/{id}/preview` | 报告生成、读取与净化预览 |
 | GET/POST | `/api/v1/mcp/servers`、`.../{name}/test`、`.../{tool}/call` | MCP 预配置服务发现与只读调用 |
 | POST/GET/PUT/DELETE | `/api/v1/workflows`、`/api/v1/workflows/{id}` | 工作流 DAG 定义与版本化 |
-| POST | `/api/v1/workflows/{id}/runs/stream`、`.../approve/stream` | 工作流运行与审批续跑 |
+| POST/GET | `/api/v1/workflows/{id}/runs/stream`、`.../approve/stream` | 工作流运行与审批续跑 |
+| GET/POST/PATCH/DELETE | `/api/v1/studio/agents/**` | Agent Studio：草稿、发布、版本、回滚、测试运行 |
+| GET/POST/PATCH/DELETE | `/api/v1/skills/**` | Skill Registry：CRUD、发布、版本 |
 
 ## 安全边界
 
@@ -131,6 +137,8 @@ mvn spring-boot:run
 - 分析输入仅来自服务端重新校验权限 + SQL Guard 后重新执行的真实受限结果，不接受前端伪造数组。
 - HTML 报告经白名单净化 + CSP + 沙箱 iframe 预览，禁止脚本执行。
 - MCP 仅连预配置白名单服务，不提供任意 URL/命令注册；工具输出视为不可信数据。
+- Agent 工具白名单在服务端真实过滤（运行关联 Agent 时非白名单工具拒绝），自定义提示词仅追加在平台安全指令之后。
+- Skill 是低信任提示词模板：只允许白名单变量、不执行脚本、不扩权、不绕过 SQL 审批。
 
 ## 本地模型测试桩
 
@@ -144,4 +152,4 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn s
 
 ## 测试
 
-- `mvn test`：123 个自动化用例，包含 Controller 切片、Service 单元测试与 P6（分析器/报告净化/工具注册表/工作流图校验）单测。
+- `mvn test`：137 个自动化用例，包含 Controller 切片、Service 单元测试与 P6/P7（分析器/报告净化/工具注册表/工作流图校验/Studio/模板渲染/Skill）单测。

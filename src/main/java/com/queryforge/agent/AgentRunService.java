@@ -5,6 +5,9 @@ import com.queryforge.knowledge.KnowledgeService;
 import com.queryforge.query.execution.ReadOnlySqlGuard;
 import com.queryforge.query.execution.SqlExecutionService;
 import com.queryforge.query.execution.SseEventWriter;
+import com.queryforge.config.ResolvedAgentConfig;
+import com.queryforge.config.RuntimeConfigResolver;
+import com.queryforge.skill.SkillService;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -72,6 +75,8 @@ public class AgentRunService {
     private final ObjectMapper objectMapper;
     private final ManagerRouter managerRouter;
     private final KnowledgeService knowledgeService;
+    private final RuntimeConfigResolver configResolver;
+    private final SkillService skillService;
 
     public AgentRunService(
             AgentRunRepository repository,
@@ -84,7 +89,9 @@ public class AgentRunService {
             AgentProperties properties,
             ObjectMapper objectMapper,
             ManagerRouter managerRouter,
-            KnowledgeService knowledgeService) {
+            KnowledgeService knowledgeService,
+            RuntimeConfigResolver configResolver,
+            SkillService skillService) {
         this.repository = repository;
         this.conversationService = conversationService;
         this.connectionService = connectionService;
@@ -96,6 +103,8 @@ public class AgentRunService {
         this.objectMapper = objectMapper;
         this.managerRouter = managerRouter;
         this.knowledgeService = knowledgeService;
+        this.configResolver = configResolver;
+        this.skillService = skillService;
     }
 
     public PreparedRun prepareStart(Long userId, CreateAgentRunRequest request) {
@@ -104,11 +113,37 @@ public class AgentRunService {
         ConnectionService.ConnectionSummary connection =
                 connectionService.summary(userId, request.connectionId());
         String question = request.userInput().trim();
+
+        ResolvedAgentConfig config = resolveConfig(userId, request);
         Long runId = repository.insertRun(
-                userId, conversationId, connection.id(), connection.name(), question, RunStatus.PLANNING);
+                userId, conversationId, connection.id(), connection.name(), question, RunStatus.PLANNING,
+                config.agentId(), config.agentVersionId(),
+                writeJson(config.skillVersionRefs()), writeJson(config.allowedToolIds()));
         conversationService.appendMessage(conversationId, MessageRole.USER, question, MessageStatus.COMPLETED);
         return new PreparedRun(
-                runId, userId, conversationId, connection.id(), connection.database(), question);
+                runId, userId, conversationId, connection.id(), connection.database(), question, config);
+    }
+
+    /** 解析运行配置：显式指定版本 > 草稿（测试）> Agent 当前发布版 > 默认。 */
+    private ResolvedAgentConfig resolveConfig(Long userId, CreateAgentRunRequest request) {
+        if (request.agentVersionId() != null) {
+            return configResolver.resolvePublishedByVersion(userId, request.agentVersionId());
+        }
+        if (request.agentId() != null) {
+            if (Boolean.TRUE.equals(request.draft())) {
+                return configResolver.resolveDraft(userId, request.agentId());
+            }
+            return configResolver.resolvePublished(userId, request.agentId());
+        }
+        return ResolvedAgentConfig.defaults();
+    }
+
+    private String writeJson(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (IOException ex) {
+            return null;
+        }
     }
 
     public void startRun(PreparedRun run, OutputStream outputStream) {
@@ -116,6 +151,11 @@ public class AgentRunService {
         try {
             writer.event("run.started",
                     new AgentStreamEvents.RunStarted(run.runId(), run.conversationId()));
+            if (run.config() != null && run.config().agentId() != null) {
+                writer.event("config.resolved", new AgentStreamEvents.ConfigResolved(
+                        run.runId(), run.config().agentId(), run.config().agentVersionId(),
+                        run.config().ragEnabled(), run.config().memoryEnabled()));
+            }
             String schema = connectionService.schemaContext(run.userId(), run.connectionId());
             List<String> recent = conversationService.recentCompletedMessages(run.conversationId(), RECENT_TURNS);
             String memory = conversationService.memorySummary(run.conversationId());
@@ -238,7 +278,7 @@ public class AgentRunService {
             throw conflict("SQL 版本已变化，请刷新后重新确认");
         }
         if (step.status() == StepStatus.SUCCEEDED) {
-            return new PreparedApproval(userId, run, step, true, databaseOf(userId, run));
+            return new PreparedApproval(userId, run, step, true, databaseOf(userId, run), configOf(run));
         }
         if (run.status().terminal()) {
             throw conflict("运行已结束，不能继续确认");
@@ -251,12 +291,23 @@ public class AgentRunService {
         if (claimed == 0) {
             AgentStep latest = requireStep(runId, stepId);
             if (latest.status() == StepStatus.SUCCEEDED && latest.sqlVersion() == request.sqlVersion()) {
-                return new PreparedApproval(userId, run, latest, true, database);
+                return new PreparedApproval(userId, run, latest, true, database, configOf(run));
             }
             throw conflict("该步骤已被处理，不能重复执行");
         }
         repository.updateRunStatus(runId, RunStatus.RUNNING, null, null, null);
-        return new PreparedApproval(userId, run, step, false, database);
+        return new PreparedApproval(userId, run, step, false, database, configOf(run));
+    }
+
+    /** 从 Run 固定的 agentVersionId 重新解析配置（版本不可变，结果稳定）。 */
+    private ResolvedAgentConfig configOf(AgentRun run) {
+        if (run.agentVersionId() != null) {
+            return configResolver.resolvePublishedByVersion(run.userId(), run.agentVersionId());
+        }
+        if (run.agentId() != null) {
+            return configResolver.resolvePublished(run.userId(), run.agentId());
+        }
+        return ResolvedAgentConfig.defaults();
     }
 
     public void executeApproval(PreparedApproval approval, OutputStream outputStream) {
@@ -407,18 +458,30 @@ public class AgentRunService {
 
     private void advance(PreparedRun run, AgentStep step, String schema, SseEventWriter writer)
             throws IOException {
-        List<KnowledgeSearchResponse.Hit> hits =
-                knowledgeService.hits(run.userId(), run.connectionId(), run.question());
+        ResolvedAgentConfig config = run.config();
+        boolean ragEnabled = config == null || config.ragEnabled();
+        List<KnowledgeSearchResponse.Hit> hits = ragEnabled
+                ? knowledgeService.hits(run.userId(), run.connectionId(), run.question())
+                : List.of();
         emitKnowledge(run.runId(), writer, hits);
-        String knowledge = knowledgeService.knowledgeContext(
-                run.userId(), run.connectionId(), run.question(), KNOWLEDGE_CONTEXT_CHARS);
+        int knowledgeBudget = config != null && config.memoryContextBudget() > 0
+                ? config.memoryContextBudget() : KNOWLEDGE_CONTEXT_CHARS;
+        String knowledge = ragEnabled
+                ? knowledgeService.knowledgeContext(
+                        run.userId(), run.connectionId(), run.question(), knowledgeBudget)
+                : "";
+
+        // 选择相关 Skill 并渲染指引（记录选择证据，不泄露模板全文到普通日志）
+        String skillGuidance = selectSkillGuidance(run, writer);
 
         writer.event("agent.started", new AgentStreamEvents.AgentStarted(run.runId(), "SQL_AGENT", "step-" + step.sequence()));
         writer.event("step.started", new AgentStreamEvents.StepStarted(step.id(), step.sequence()));
         String sql;
         try {
+            String customPrompt = config == null ? "" : config.systemPrompt();
             sql = countLlm(run.runId(), () ->
-                    sqlAssistant.generateSql(step.objective(), schema, previousSummaries(run.runId(), step.sequence()), knowledge));
+                    sqlAssistant.generateSql(step.objective(), schema, previousSummaries(run.runId(), step.sequence()),
+                            knowledge, customPrompt, skillGuidance));
             sql = guard.validate(sql, run.database());
         } catch (ApiException ex) {
             writer.event("agent.completed", new AgentStreamEvents.AgentCompleted(
@@ -441,6 +504,32 @@ public class AgentRunService {
         writer.event("approval.required", new AgentStreamEvents.ApprovalRequired(step.id(), nextVersion));
     }
 
+    /** 按任务问题选择绑定的已发布 Skill 并渲染指引；无相关 Skill 时返回空串。 */
+    private String selectSkillGuidance(PreparedRun run, SseEventWriter writer) throws IOException {
+        ResolvedAgentConfig config = run.config();
+        if (config == null || config.skillVersionRefs().isEmpty()) {
+            return "";
+        }
+        List<SkillService.SkillRef> refs = config.skillVersionRefs().entrySet().stream()
+                .map(entry -> new SkillService.SkillRef(entry.getKey(), entry.getValue()))
+                .toList();
+        List<SkillService.SelectedSkill> selected = skillService.selectAndRender(
+                refs, run.question(), null, 3);
+        if (selected.isEmpty()) {
+            return "";
+        }
+        // 记录选择证据（skillId、版本号），不记录模板全文
+        List<AgentStreamEvents.SkillSelectedView> views = selected.stream()
+                .map(s -> new AgentStreamEvents.SkillSelectedView(s.skillId(), s.skillVersionId(), s.versionNo()))
+                .toList();
+        writer.event("skill.selected", new AgentStreamEvents.SkillSelected(run.runId(), views));
+        StringBuilder guidance = new StringBuilder();
+        for (SkillService.SelectedSkill s : selected) {
+            guidance.append("【Skill v").append(s.versionNo()).append("】").append(s.renderedGuidance()).append("\n");
+        }
+        return guidance.toString();
+    }
+
     private void advanceAfterStep(PreparedApproval approval, SseEventWriter writer) throws IOException {
         AgentRun run = approval.run();
         List<AgentStep> steps = repository.findSteps(run.id());
@@ -450,7 +539,7 @@ public class AgentRunService {
         if (next.isPresent()) {
             PreparedRun continuation = new PreparedRun(
                     run.id(), approval.userId(), run.conversationId(),
-                    run.connectionId(), approval.database(), run.question());
+                    run.connectionId(), approval.database(), run.question(), approval.config());
             String schema = connectionService.schemaContext(approval.userId(), run.connectionId());
             advance(continuation, next.get(), schema, writer);
             return;
@@ -472,11 +561,16 @@ public class AgentRunService {
                 run.conversationId(), MessageRole.ASSISTANT, summary, MessageStatus.COMPLETED);
         writer.event("run.completed", new AgentStreamEvents.RunCompleted(run.id(), summary));
         PreparedRun prepared = new PreparedRun(
-                run.id(), approval.userId(), run.conversationId(), run.connectionId(), approval.database(), run.question());
+                run.id(), approval.userId(), run.conversationId(), run.connectionId(), approval.database(),
+                run.question(), approval.config());
         updateMemory(prepared, summary);
     }
 
     private void updateMemory(PreparedRun run, String answer) {
+        ResolvedAgentConfig config = run.config();
+        if (config != null && !config.memoryEnabled()) {
+            return; // Memory 关闭：不写入会话摘要
+        }
         try {
             String previous = conversationService.memorySummary(run.conversationId());
             String summary = countLlm(run.runId(), () ->
@@ -725,8 +819,14 @@ public class AgentRunService {
             Long conversationId,
             Long connectionId,
             String database,
-            String question
+            String question,
+            ResolvedAgentConfig config
     ) {
+        /** 兼容旧构造：无配置时用默认配置。 */
+        public PreparedRun(Long runId, Long userId, Long conversationId, Long connectionId,
+                           String database, String question) {
+            this(runId, userId, conversationId, connectionId, database, question, ResolvedAgentConfig.defaults());
+        }
     }
 
     public record PreparedApproval(
@@ -734,7 +834,8 @@ public class AgentRunService {
             AgentRun run,
             AgentStep step,
             boolean replay,
-            String database
+            String database,
+            ResolvedAgentConfig config
     ) {
     }
 }

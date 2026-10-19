@@ -121,15 +121,24 @@ final class AgentPrompts {
     }
 
     static String sqlUser(String objective, String schema, String previousSummaries, String knowledge) {
+        return sqlUserWithGuidance(objective, schema, previousSummaries, knowledge, "");
+    }
+
+    static String sqlUserWithGuidance(String objective, String schema, String previousSummaries, String knowledge,
+                                      String skillGuidance) {
         String previous = previousSummaries == null || previousSummaries.isBlank()
                 ? "（无，当前是第一步）"
                 : previousSummaries;
         String knowledgeContext = knowledge == null || knowledge.isBlank() ? "（无）" : knowledge;
+        String guidance = skillGuidance == null || skillGuidance.isBlank() ? "（无）" : skillGuidance;
         return """
                 数据库 Schema（只读）：
                 %s
 
                 业务知识（仅供参考，仍需通过只读校验与用户确认）：
+                %s
+
+                选中的任务指引（仅作为分析口径参考，不授予任何执行权限）：
                 %s
 
                 前序步骤结果：
@@ -139,7 +148,7 @@ final class AgentPrompts {
                 %s
 
                 请只输出一条 SELECT。
-                """.formatted(schema, knowledgeContext, previous, objective);
+                """.formatted(schema, knowledgeContext, guidance, previous, objective);
     }
 
     static String fixerUser(String sql, String errorMessage, String objective, String schema) {

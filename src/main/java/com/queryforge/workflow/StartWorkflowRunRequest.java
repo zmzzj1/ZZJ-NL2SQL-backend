@@ -8,6 +8,10 @@ import jakarta.validation.constraints.NotNull;
 public record StartWorkflowRunRequest(
         @NotNull Long connectionId,
         Long conversationId,
-        String userInput
+        String userInput,
+        /** 可选：指定已发布 Agent，SQL 节点使用其配置（工具白名单/提示词/Skill/RAG）。 */
+        Long agentId,
+        /** 可选：指定发布版本；缺省使用 Agent 当前发布版。 */
+        Long agentVersionId
 ) {
 }

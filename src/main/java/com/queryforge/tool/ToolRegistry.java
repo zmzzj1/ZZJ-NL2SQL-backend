@@ -1,6 +1,10 @@
 package com.queryforge.tool;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.queryforge.agent.AgentRun;
+import com.queryforge.agent.AgentRunRepository;
 import com.queryforge.shared.error.ApiException;
 import com.queryforge.shared.error.ErrorCode;
 import java.util.LinkedHashMap;
@@ -12,6 +16,7 @@ import org.springframework.stereotype.Service;
 /**
  * 受控工具注册表：收集全部 Tool bean 形成固定白名单，服务端做参数校验与归属审计。
  * 未授权/未知工具不进入候选集、不执行。P6 默认只读，写能力一律不开放。
+ * P7 增加 Agent 配置过滤：运行关联 Agent 时，工具必须在 Agent 白名单内才可执行。
  */
 @Service
 public class ToolRegistry {
@@ -19,11 +24,13 @@ public class ToolRegistry {
     private final Map<String, Tool> tools = new LinkedHashMap<>();
     private final ToolInvocationRepository auditRepository;
     private final ObjectMapper objectMapper;
+    private final AgentRunRepository agentRunRepository;
 
     public ToolRegistry(List<Tool> registeredTools, ToolInvocationRepository auditRepository,
-                        ObjectMapper objectMapper) {
+                        ObjectMapper objectMapper, AgentRunRepository agentRunRepository) {
         this.auditRepository = auditRepository;
         this.objectMapper = objectMapper;
+        this.agentRunRepository = agentRunRepository;
         for (Tool tool : registeredTools) {
             tools.put(tool.name(), tool);
         }
@@ -36,7 +43,7 @@ public class ToolRegistry {
                 .toList();
     }
 
-    /** 执行工具：白名单校验 → 参数校验 → 执行 → 审计。 */
+    /** 执行工具：白名单校验 → Agent 白名单过滤 → 参数校验 → 执行 → 审计。 */
     public ToolInvocationResult invoke(ToolInvocation invocation, Map<String, Object> args) {
         Tool tool = tools.get(invocation.toolName());
         if (tool == null) {
@@ -44,6 +51,10 @@ public class ToolRegistry {
         }
         if (!tool.readOnly()) {
             throw new ApiException(ErrorCode.TOOL_FORBIDDEN, HttpStatus.FORBIDDEN, "该工具不支持执行");
+        }
+        if (!allowsByAgentPolicy(invocation)) {
+            throw new ApiException(ErrorCode.TOOL_NOT_IN_AGENT_WHITELIST, HttpStatus.FORBIDDEN,
+                    "当前 Agent 配置未授权该工具：" + invocation.toolName());
         }
         validateArgs(tool, args);
         long startedAt = System.nanoTime();
@@ -57,6 +68,32 @@ public class ToolRegistry {
         } catch (RuntimeException ex) {
             auditRepository.insert(invocation, "FAILED", elapsedMs(startedAt), "TOOL_EXECUTION_ERROR");
             throw new ApiException(ErrorCode.TOOL_EXECUTION_ERROR, HttpStatus.INTERNAL_SERVER_ERROR, "工具执行失败");
+        }
+    }
+
+    /** 运行关联 Agent 时，工具必须在 Agent 白名单内；无 Agent 或白名单为空则放行（默认行为）。 */
+    private boolean allowsByAgentPolicy(ToolInvocation invocation) {
+        if (invocation.agentRunId() == null) {
+            return true;
+        }
+        AgentRun run = agentRunRepository.findRun(invocation.agentRunId()).orElse(null);
+        if (run == null || run.agentId() == null) {
+            return true;
+        }
+        List<String> allowed = parseAllowedTools(run.toolPolicyHash());
+        return allowed.isEmpty() || allowed.contains(invocation.toolName());
+    }
+
+    private List<String> parseAllowedTools(String json) {
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            List<String> list = objectMapper.readValue(json, new TypeReference<List<String>>() {
+            });
+            return list == null ? List.of() : list;
+        } catch (JsonProcessingException ex) {
+            return List.of();
         }
     }
 

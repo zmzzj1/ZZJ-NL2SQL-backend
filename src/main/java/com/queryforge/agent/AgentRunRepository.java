@@ -26,7 +26,8 @@ public class AgentRunRepository {
     private static final String RUN_COLUMNS = """
             id, user_id, conversation_id, connection_id, connection_name_snapshot, question,
             status, route, role_activities, knowledge_sources, llm_call_count,
-            summary, error_code, error_message, created_at, updated_at
+            summary, error_code, error_message, created_at, updated_at,
+            agent_id, agent_version_id, resolved_skill_versions, tool_policy_hash
             """;
 
     private static final String STEP_COLUMNS = """
@@ -43,12 +44,20 @@ public class AgentRunRepository {
 
     public Long insertRun(Long userId, Long conversationId, Long connectionId, String connectionName,
                           String question, RunStatus status) {
+        return insertRun(userId, conversationId, connectionId, connectionName, question, status,
+                null, null, null, null);
+    }
+
+    public Long insertRun(Long userId, Long conversationId, Long connectionId, String connectionName,
+                          String question, RunStatus status, Long agentId, Long agentVersionId,
+                          String resolvedSkillVersions, String toolPolicyHash) {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbcTemplate.update(connection -> {
             PreparedStatement statement = connection.prepareStatement("""
                     INSERT INTO agent_runs
-                        (user_id, conversation_id, connection_id, connection_name_snapshot, question, status)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                        (user_id, conversation_id, connection_id, connection_name_snapshot, question, status,
+                         agent_id, agent_version_id, resolved_skill_versions, tool_policy_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, Statement.RETURN_GENERATED_KEYS);
             statement.setLong(1, userId);
             statement.setLong(2, conversationId);
@@ -56,6 +65,10 @@ public class AgentRunRepository {
             statement.setString(4, connectionName);
             statement.setString(5, question);
             statement.setString(6, status.name());
+            setNullableLong(statement, 7, agentId);
+            setNullableLong(statement, 8, agentVersionId);
+            statement.setString(9, resolvedSkillVersions);
+            statement.setString(10, toolPolicyHash);
             return statement;
         }, keyHolder);
         Number key = keyHolder.getKey();
@@ -106,6 +119,15 @@ public class AgentRunRepository {
                 (resultSet, rowNum) -> mapRun(resultSet),
                 userId,
                 conversationId);
+        return rows.stream().findFirst();
+    }
+
+    /** 供 ToolRegistry 校验：按 runId 取运行归属与工具策略快照（不限制 user，调用方自行校验）。 */
+    public Optional<AgentRun> findRun(Long runId) {
+        List<AgentRun> rows = jdbcTemplate.query(
+                "SELECT " + RUN_COLUMNS + " FROM agent_runs WHERE id = ?",
+                (resultSet, rowNum) -> mapRun(resultSet),
+                runId);
         return rows.stream().findFirst();
     }
 
@@ -295,6 +317,10 @@ public class AgentRunRepository {
     private static AgentRun mapRun(java.sql.ResultSet resultSet) throws java.sql.SQLException {
         long connectionId = resultSet.getLong("connection_id");
         Long nullableConnectionId = resultSet.wasNull() ? null : connectionId;
+        long agentId = resultSet.getLong("agent_id");
+        Long nullableAgentId = resultSet.wasNull() ? null : agentId;
+        long agentVersionId = resultSet.getLong("agent_version_id");
+        Long nullableAgentVersionId = resultSet.wasNull() ? null : agentVersionId;
         return new AgentRun(
                 resultSet.getLong("id"),
                 resultSet.getLong("user_id"),
@@ -311,7 +337,11 @@ public class AgentRunRepository {
                 resultSet.getString("error_code"),
                 resultSet.getString("error_message"),
                 resultSet.getTimestamp("created_at").toLocalDateTime(),
-                resultSet.getTimestamp("updated_at").toLocalDateTime());
+                resultSet.getTimestamp("updated_at").toLocalDateTime(),
+                nullableAgentId,
+                nullableAgentVersionId,
+                resultSet.getString("resolved_skill_versions"),
+                resultSet.getString("tool_policy_hash"));
     }
 
     private static AgentStep mapStep(java.sql.ResultSet resultSet) throws java.sql.SQLException {
