@@ -25,12 +25,13 @@ public class UserRepository {
 
     public Optional<AppUserPrincipal> findByEmail(String email) {
         List<AppUserPrincipal> users = jdbcTemplate.query(
-                "SELECT id, email, display_name, password_hash FROM users WHERE email = ?",
+                "SELECT id, email, display_name, password_hash, role FROM users WHERE email = ?",
                 (resultSet, rowNum) -> new AppUserPrincipal(
                         resultSet.getLong("id"),
                         resultSet.getString("email"),
                         resultSet.getString("display_name"),
-                        resultSet.getString("password_hash")),
+                        resultSet.getString("password_hash"),
+                        resultSet.getString("role")),
                 email);
         return users.stream().findFirst();
     }

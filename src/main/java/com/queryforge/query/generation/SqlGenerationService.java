@@ -68,6 +68,8 @@ public class SqlGenerationService {
 
         LlmStream stream;
         try {
+            com.queryforge.model.ModelRouteContextHolder.set(
+                    new com.queryforge.model.ModelRouteContextHolder.Context(userId, null, null, null, null));
             stream = llmClient.open(question, schemaContext);
         } catch (RuntimeException ex) {
             if (ticket != null) {
@@ -79,6 +81,8 @@ public class SqlGenerationService {
                 }
             }
             throw ex;
+        } finally {
+            com.queryforge.model.ModelRouteContextHolder.clear();
         }
         return new PreparedGeneration(requestId, stream, ticket);
     }

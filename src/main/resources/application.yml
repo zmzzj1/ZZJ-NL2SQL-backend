@@ -80,3 +80,15 @@ logging:
     com.queryforge: INFO
     org.springframework.jdbc.core: WARN
     org.springframework.security: WARN
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: never
+  metrics:
+    enable:
+      all: false

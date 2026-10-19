@@ -15,12 +15,18 @@ public final class AppUserPrincipal implements UserDetails {
     private final String email;
     private final String displayName;
     private final String passwordHash;
+    private final String role;
 
     public AppUserPrincipal(Long id, String email, String displayName, String passwordHash) {
+        this(id, email, displayName, passwordHash, "USER");
+    }
+
+    public AppUserPrincipal(Long id, String email, String displayName, String passwordHash, String role) {
         this.id = id;
         this.email = email;
         this.displayName = displayName;
         this.passwordHash = passwordHash;
+        this.role = (role == null || role.isBlank()) ? "USER" : role;
     }
 
     public Long id() {
@@ -35,9 +41,14 @@ public final class AppUserPrincipal implements UserDetails {
         return displayName;
     }
 
+    /** 平台管理员由服务端持久化的 role 字段判定，前端传入 role 无效。 */
+    public boolean isPlatformAdmin() {
+        return "ADMIN".equalsIgnoreCase(role);
+    }
+
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
-        return List.of(new SimpleGrantedAuthority("ROLE_USER"));
+        return List.of(new SimpleGrantedAuthority(isPlatformAdmin() ? "ROLE_ADMIN" : "ROLE_USER"));
     }
 
     @Override

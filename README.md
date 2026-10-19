@@ -1,6 +1,6 @@
 # QueryForge 后端（真实用户与多数据源）
 
-Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio 与 Skill Registry；P8 新增工作空间、混合 RAG 与类型化长期记忆。
+Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性。
 
 ## 环境要求
 
@@ -25,6 +25,8 @@ Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL �
 - 工作空间：OWNER/ADMIN/EDITOR/VIEWER 成员角色与资源授权；共享知识或 Agent 不自动授予数据源和 SQL 执行权限。
 - 混合 RAG：关键词、真实 Embedding 向量和 RRF 融合三种模式，命中结果保留来源、版本与分数。
 - 长期记忆：个人/空间作用域、类型、来源、置信度、去重、禁用与检索，并按用户及空间权限隔离。
+- 模型治理：供应商与能力档案、用户/空间/Agent 授权、版本化路由策略、熔断、有界重试和故障转移。
+- 平台管理：模型调用记录、用量与失败分类、配额、管理审计；管理接口仅允许服务端持久化的 PLATFORM_ADMIN。
 
 ## 数据库初始化
 
@@ -42,6 +44,7 @@ mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/re
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/07-p6-tools-analysis-report-mcp-workflow.sql
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/08-p7-agent-studio-skill.sql
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/09-p8-workspace-rag-memory.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/10-p9-model-governance.sql
 ```
 
 创建账号（密码由本地管理员设置，不提交仓库）：
@@ -133,6 +136,8 @@ mvn spring-boot:run
 | GET/POST/PATCH/DELETE | `/api/v1/workspaces/**` | 工作空间、成员角色与资源授权 |
 | GET/POST/PATCH/DELETE | `/api/v1/memories/**` | 类型化长期记忆维护与检索 |
 | POST | `/api/v1/knowledge/search` | 按权限执行 KEYWORD、VECTOR 或 HYBRID 检索 |
+| GET/POST/PATCH | `/api/v1/model/**` | 模型供应商、能力档案、授权与路由策略 |
+| GET/POST | `/api/v1/admin/**` | 管理概览、模型用量、配额和审计 |
 
 ## 安全边界
 
@@ -151,6 +156,9 @@ mvn spring-boot:run
 - 工作空间授权与资源自身权限分离；共享资源不会绕过连接归属、SQL Guard 或执行审批。
 - RAG 候选在数据库查询阶段按用户/空间过滤；Embedding 不可用时向量与混合模式明确失败，不伪装成向量召回。
 - 长期记忆按个人/空间隔离，携带来源与置信度；用户可编辑、禁用或删除。
+- 平台管理员身份只由数据库用户角色决定；Workspace OWNER 不自动获得平台管理权限。
+- 模型供应商 Key 加密保存且永不回传；供应商 URL 拒绝回环、私网、保留网段及非 HTTP(S) 协议。
+- 路由先执行能力与授权过滤，再应用策略；流式响应中断后不拼接其他模型，SQL Guard 与审批边界保持不变。
 
 ## 本地模型测试桩
 
@@ -164,4 +172,4 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn s
 
 ## 测试
 
-- `mvn test`：152 个自动化用例，包含 Controller 切片、Service 单元测试，以及 P6–P8（分析器/报告净化/工具注册表/工作流图校验/Studio/Skill/Workspace/混合检索/Memory）单测。
+- `mvn test`：174 个自动化用例，包含 Controller 切片、Service 单元测试，以及 P6–P9（分析器/报告/工具/工作流/Studio/Skill/Workspace/RAG/Memory/模型路由/熔断/重试/权限）单测。
