@@ -11,6 +11,9 @@ public record KnowledgeSearchRequest(
 
         @NotBlank(message = "query 不能为空")
         @Size(max = 500, message = "query 最长 500 字符")
-        String query
+        String query,
+
+        /** 可选：当前工作空间，命中共享知识时生效（需成员资格）。 */
+        Long workspaceId
 ) {
 }

@@ -8,6 +8,8 @@ import com.queryforge.query.execution.SseEventWriter;
 import com.queryforge.config.ResolvedAgentConfig;
 import com.queryforge.config.RuntimeConfigResolver;
 import com.queryforge.skill.SkillService;
+import com.queryforge.memory.MemoryService;
+import com.queryforge.memory.MemoryService.Scope;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -60,6 +62,7 @@ public class AgentRunService {
     private static final int LIST_LIMIT = 20;
     private static final int RECENT_TURNS = 6;
     private static final int KNOWLEDGE_CONTEXT_CHARS = 2000;
+    private static final int MEMORY_CONTEXT_CHARS = 1500;
 
     private static final String CHITCHAT_REPLY =
             "你好！我是 SQL 分析助手。你可以描述一个业务问题，我会基于真实 Schema 生成只读 SQL 并等待你确认。";
@@ -77,6 +80,7 @@ public class AgentRunService {
     private final KnowledgeService knowledgeService;
     private final RuntimeConfigResolver configResolver;
     private final SkillService skillService;
+    private final MemoryService memoryService;
 
     public AgentRunService(
             AgentRunRepository repository,
@@ -91,7 +95,8 @@ public class AgentRunService {
             ManagerRouter managerRouter,
             KnowledgeService knowledgeService,
             RuntimeConfigResolver configResolver,
-            SkillService skillService) {
+            SkillService skillService,
+            MemoryService memoryService) {
         this.repository = repository;
         this.conversationService = conversationService;
         this.connectionService = connectionService;
@@ -105,6 +110,7 @@ public class AgentRunService {
         this.knowledgeService = knowledgeService;
         this.configResolver = configResolver;
         this.skillService = skillService;
+        this.memoryService = memoryService;
     }
 
     public PreparedRun prepareStart(Long userId, CreateAgentRunRequest request) {
@@ -121,7 +127,8 @@ public class AgentRunService {
                 writeJson(config.skillVersionRefs()), writeJson(config.allowedToolIds()));
         conversationService.appendMessage(conversationId, MessageRole.USER, question, MessageStatus.COMPLETED);
         return new PreparedRun(
-                runId, userId, conversationId, connection.id(), connection.database(), question, config);
+                runId, userId, conversationId, connection.id(), connection.database(), question, config,
+                request.workspaceId());
     }
 
     /** 解析运行配置：显式指定版本 > 草稿（测试）> Agent 当前发布版 > 默认。 */
@@ -461,18 +468,20 @@ public class AgentRunService {
         ResolvedAgentConfig config = run.config();
         boolean ragEnabled = config == null || config.ragEnabled();
         List<KnowledgeSearchResponse.Hit> hits = ragEnabled
-                ? knowledgeService.hits(run.userId(), run.connectionId(), run.question())
+                ? knowledgeHits(run)
                 : List.of();
         emitKnowledge(run.runId(), writer, hits);
         int knowledgeBudget = config != null && config.memoryContextBudget() > 0
                 ? config.memoryContextBudget() : KNOWLEDGE_CONTEXT_CHARS;
         String knowledge = ragEnabled
-                ? knowledgeService.knowledgeContext(
-                        run.userId(), run.connectionId(), run.question(), knowledgeBudget)
+                ? knowledgeContext(run, knowledgeBudget)
                 : "";
 
         // 选择相关 Skill 并渲染指引（记录选择证据，不泄露模板全文到普通日志）
         String skillGuidance = selectSkillGuidance(run, writer);
+
+        // 长期 Memory 注入（尊重 Agent 配置的 memory.enabled；按 workspace 过滤权限）
+        String memoryContext = memoryContext(run, writer);
 
         writer.event("agent.started", new AgentStreamEvents.AgentStarted(run.runId(), "SQL_AGENT", "step-" + step.sequence()));
         writer.event("step.started", new AgentStreamEvents.StepStarted(step.id(), step.sequence()));
@@ -481,7 +490,7 @@ public class AgentRunService {
             String customPrompt = config == null ? "" : config.systemPrompt();
             sql = countLlm(run.runId(), () ->
                     sqlAssistant.generateSql(step.objective(), schema, previousSummaries(run.runId(), step.sequence()),
-                            knowledge, customPrompt, skillGuidance));
+                            knowledge + memoryContext, customPrompt, skillGuidance));
             sql = guard.validate(sql, run.database());
         } catch (ApiException ex) {
             writer.event("agent.completed", new AgentStreamEvents.AgentCompleted(
@@ -528,6 +537,63 @@ public class AgentRunService {
             guidance.append("【Skill v").append(s.versionNo()).append("】").append(s.renderedGuidance()).append("\n");
         }
         return guidance.toString();
+    }
+
+    /** Workspace 感知的知识命中：传入 workspaceId 时包含空间已授权共享知识。 */
+    private List<KnowledgeSearchResponse.Hit> knowledgeHits(PreparedRun run) {
+        if (run.workspaceId() != null) {
+            return knowledgeService.search(run.userId(), run.connectionId(), run.question(), run.workspaceId()).items();
+        }
+        return knowledgeService.hits(run.userId(), run.connectionId(), run.question());
+    }
+
+    /** Workspace 感知的知识上下文（带来源标识）。 */
+    private String knowledgeContext(PreparedRun run, int maxChars) {
+        if (run.workspaceId() == null) {
+            return knowledgeService.knowledgeContext(run.userId(), run.connectionId(), run.question(), maxChars);
+        }
+        KnowledgeSearchResponse search = knowledgeService.search(
+                run.userId(), run.connectionId(), run.question(), run.workspaceId());
+        StringBuilder builder = new StringBuilder();
+        for (KnowledgeSearchResponse.Hit hit : search.items()) {
+            String line = "[" + hit.sourceType() + "#" + hit.id() + " v" + hit.version() + "] "
+                    + hit.title() + "：" + hit.snippet();
+            if (builder.length() + line.length() > maxChars) {
+                break;
+            }
+            builder.append(line).append('\n');
+        }
+        return builder.toString();
+    }
+
+    /**
+     * 长期 Memory 注入（尊重 Agent 配置 memory.enabled）。
+     * workspaceId 存在时检索工作空间记忆（需成员资格）；否则检索个人记忆。
+     */
+    private String memoryContext(PreparedRun run, SseEventWriter writer) throws IOException {
+        ResolvedAgentConfig config = run.config();
+        if (config == null || !config.memoryEnabled()) {
+            return "";
+        }
+        try {
+            String context;
+            if (run.workspaceId() != null) {
+                context = memoryService.memoryContext(run.userId(), run.workspaceId(), Scope.WORKSPACE,
+                        run.question(), MEMORY_CONTEXT_CHARS);
+            } else {
+                context = memoryService.memoryContext(run.userId(), null, Scope.PERSONAL,
+                        run.question(), MEMORY_CONTEXT_CHARS);
+            }
+            if (context != null && !context.isBlank()) {
+                long count = context.lines().count();
+                writer.event("memory.retrieved", new AgentStreamEvents.MemoryRetrieved(run.runId(), count));
+                return "【长期记忆】\n" + context;
+            }
+            return "";
+        } catch (RuntimeException ex) {
+            log.warn("agent_memory_context_failed runId={} message={}", run.runId(), ex.getMessage());
+            return "";
+        }
     }
 
     private void advanceAfterStep(PreparedApproval approval, SseEventWriter writer) throws IOException {
@@ -820,12 +886,18 @@ public class AgentRunService {
             Long connectionId,
             String database,
             String question,
-            ResolvedAgentConfig config
+            ResolvedAgentConfig config,
+            Long workspaceId
     ) {
-        /** 兼容旧构造：无配置时用默认配置。 */
+        /** 兼容旧构造：无配置时用默认配置，无空间上下文。 */
         public PreparedRun(Long runId, Long userId, Long conversationId, Long connectionId,
                            String database, String question) {
-            this(runId, userId, conversationId, connectionId, database, question, ResolvedAgentConfig.defaults());
+            this(runId, userId, conversationId, connectionId, database, question, ResolvedAgentConfig.defaults(), null);
+        }
+
+        public PreparedRun(Long runId, Long userId, Long conversationId, Long connectionId,
+                           String database, String question, ResolvedAgentConfig config) {
+            this(runId, userId, conversationId, connectionId, database, question, config, null);
         }
     }
 

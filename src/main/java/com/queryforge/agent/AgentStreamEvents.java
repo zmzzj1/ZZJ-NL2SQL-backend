@@ -78,4 +78,8 @@ public final class AgentStreamEvents {
     /** 记录本轮解析的 Agent 配置摘要（不含敏感提示词全文）。 */
     public record ConfigResolved(Long runId, Long agentId, Long agentVersionId, boolean ragEnabled, boolean memoryEnabled) {
     }
+
+    /** 记录本轮注入的长期记忆条数（不含记忆正文）。 */
+    public record MemoryRetrieved(Long runId, long count) {
+    }
 }

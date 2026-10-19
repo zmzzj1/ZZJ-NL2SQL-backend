@@ -23,3 +23,5 @@ tools/p6-e2e.py
 tools/p6-e2e-out/
 tools/p7-e2e.py
 tools/p7-e2e-out.json
+tools/p8-e2e.py
+tools/p8-e2e-out.json

@@ -70,6 +70,6 @@ public class KnowledgeController {
     public KnowledgeSearchResponse search(
             @AuthenticationPrincipal AppUserPrincipal principal,
             @Valid @RequestBody KnowledgeSearchRequest request) {
-        return service.search(principal.id(), request.connectionId(), request.query());
+        return service.search(principal.id(), request.connectionId(), request.query(), request.workspaceId());
     }
 }

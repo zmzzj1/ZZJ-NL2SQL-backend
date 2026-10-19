@@ -1,6 +1,6 @@
 # QueryForge 后端（真实用户与多数据源）
 
-Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流，以及 P7 新增的 Agent Studio、Skill Registry、Agent 配置管理、版本发布回滚与 Dashboard/Workflow 集成。
+Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio 与 Skill Registry；P8 新增工作空间、混合 RAG 与类型化长期记忆。
 
 ## 环境要求
 
@@ -22,6 +22,9 @@ Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL �
 - Agent Studio：草稿 CRUD、工具白名单、RAG/Memory 策略、Skill 绑定、发布不可变版本、回滚与审计。
 - Skill Registry：CRUD、不可变版本发布、模板白名单变量校验、运行时按相关性选择并注入。
 - 运行配置统一解析（`config/RuntimeConfigResolver`），配置真正影响 Manager/Agent Run/Tool Registry；Run 固定版本快照。
+- 工作空间：OWNER/ADMIN/EDITOR/VIEWER 成员角色与资源授权；共享知识或 Agent 不自动授予数据源和 SQL 执行权限。
+- 混合 RAG：关键词、真实 Embedding 向量和 RRF 融合三种模式，命中结果保留来源、版本与分数。
+- 长期记忆：个人/空间作用域、类型、来源、置信度、去重、禁用与检索，并按用户及空间权限隔离。
 
 ## 数据库初始化
 
@@ -38,6 +41,7 @@ mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/re
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/06-knowledge-memory.sql
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/07-p6-tools-analysis-report-mcp-workflow.sql
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/08-p7-agent-studio-skill.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/09-p8-workspace-rag-memory.sql
 ```
 
 创建账号（密码由本地管理员设置，不提交仓库）：
@@ -74,6 +78,8 @@ APP_ENCRYPTION_KEY=<base64-32-bytes>
 | `CONNECTION_ALLOWED_HOSTS` | 允许连接的主机，默认 `127.0.0.1,localhost` |
 | `CONNECTION_ALLOWED_PORTS` | 允许连接的端口，默认 `3306,3307,3308,3309,3310` |
 | `LLM_BASE_URL/API_KEY/MODEL` | 模型配置；无 Key 时生成返回 503 |
+| `EMBEDDING_BASE_URL/API_KEY/MODEL/DIMENSIONS` | OpenAI 兼容 Embedding 配置；默认地址与密钥可继承 LLM 配置 |
+| `EMBEDDING_REQUEST_TIMEOUT` | Embedding 请求超时，默认 30 秒 |
 | `SQL_MAX_ROWS` / `SQL_QUERY_TIMEOUT_SECONDS` | 行数/超时限制 |
 | `AGENT_MAX_STEPS` / `AGENT_MAX_REPAIRS` | Agent 最大步骤数/单步最大修复次数 |
 | `AGENT_MAX_PLAN_CHARS` / `AGENT_MAX_LLM_CALLS` | 计划长度/单次运行 LLM 调用上限 |
@@ -124,6 +130,9 @@ mvn spring-boot:run
 | POST/GET | `/api/v1/workflows/{id}/runs/stream`、`.../approve/stream` | 工作流运行与审批续跑 |
 | GET/POST/PATCH/DELETE | `/api/v1/studio/agents/**` | Agent Studio：草稿、发布、版本、回滚、测试运行 |
 | GET/POST/PATCH/DELETE | `/api/v1/skills/**` | Skill Registry：CRUD、发布、版本 |
+| GET/POST/PATCH/DELETE | `/api/v1/workspaces/**` | 工作空间、成员角色与资源授权 |
+| GET/POST/PATCH/DELETE | `/api/v1/memories/**` | 类型化长期记忆维护与检索 |
+| POST | `/api/v1/knowledge/search` | 按权限执行 KEYWORD、VECTOR 或 HYBRID 检索 |
 
 ## 安全边界
 
@@ -139,6 +148,9 @@ mvn spring-boot:run
 - MCP 仅连预配置白名单服务，不提供任意 URL/命令注册；工具输出视为不可信数据。
 - Agent 工具白名单在服务端真实过滤（运行关联 Agent 时非白名单工具拒绝），自定义提示词仅追加在平台安全指令之后。
 - Skill 是低信任提示词模板：只允许白名单变量、不执行脚本、不扩权、不绕过 SQL 审批。
+- 工作空间授权与资源自身权限分离；共享资源不会绕过连接归属、SQL Guard 或执行审批。
+- RAG 候选在数据库查询阶段按用户/空间过滤；Embedding 不可用时向量与混合模式明确失败，不伪装成向量召回。
+- 长期记忆按个人/空间隔离，携带来源与置信度；用户可编辑、禁用或删除。
 
 ## 本地模型测试桩
 
@@ -152,4 +164,4 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn s
 
 ## 测试
 
-- `mvn test`：137 个自动化用例，包含 Controller 切片、Service 单元测试与 P6/P7（分析器/报告净化/工具注册表/工作流图校验/Studio/模板渲染/Skill）单测。
+- `mvn test`：152 个自动化用例，包含 Controller 切片、Service 单元测试，以及 P6–P8（分析器/报告净化/工具注册表/工作流图校验/Studio/Skill/Workspace/混合检索/Memory）单测。

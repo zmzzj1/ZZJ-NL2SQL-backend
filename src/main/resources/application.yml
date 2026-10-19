@@ -44,6 +44,12 @@ app:
     model: ${LLM_MODEL:deepseek-chat}
     connect-timeout: ${LLM_CONNECT_TIMEOUT:10s}
     request-timeout: ${LLM_REQUEST_TIMEOUT:60s}
+  embedding:
+    base-url: ${EMBEDDING_BASE_URL:${LLM_BASE_URL:https://api.deepseek.com/v1}}
+    api-key: ${EMBEDDING_API_KEY:${LLM_API_KEY:}}
+    model: ${EMBEDDING_MODEL:qwen3.7-text-embedding-flash}
+    dimensions: ${EMBEDDING_DIMENSIONS:1024}
+    request-timeout: ${EMBEDDING_REQUEST_TIMEOUT:30s}
   sql:
     max-rows: ${SQL_MAX_ROWS:200}
     query-timeout-seconds: ${SQL_QUERY_TIMEOUT_SECONDS:5}

@@ -23,6 +23,9 @@ public record CreateAgentRunRequest(
         Long agentVersionId,
 
         /** 可选：true 表示读取草稿快照（Studio 测试预览）；缺省 false 使用发布版。 */
-        Boolean draft
+        Boolean draft,
+
+        /** 可选：当前工作空间，命中共享知识与工作空间记忆时生效（需成员资格）。 */
+        Long workspaceId
 ) {
 }

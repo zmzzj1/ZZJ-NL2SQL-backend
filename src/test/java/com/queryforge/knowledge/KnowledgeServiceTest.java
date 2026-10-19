@@ -15,6 +15,7 @@ import com.queryforge.shared.error.ApiException;
 import com.queryforge.shared.error.ErrorCode;
 import com.queryforge.datasource.repository.ConnectionRepository;
 import com.queryforge.knowledge.KnowledgeRepository;
+import com.queryforge.workspace.WorkspaceAccessPolicy;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
@@ -39,11 +40,14 @@ class KnowledgeServiceTest {
     @Mock
     private ConnectionRepository connectionRepository;
 
+    @Mock
+    private WorkspaceAccessPolicy workspaceAccessPolicy;
+
     private KnowledgeService service;
 
     @BeforeEach
     void setUp() {
-        service = new KnowledgeService(repository, connectionRepository);
+        service = new KnowledgeService(repository, connectionRepository, workspaceAccessPolicy);
     }
 
     @Test
@@ -92,6 +96,22 @@ class KnowledgeServiceTest {
         // 2-gram 扩展可能让无关条目低分进入候选，但必须排在精确命中之后。
         assertThat(result.items().stream().mapToDouble(KnowledgeSearchResponse.Hit::score).toArray())
                 .isSortedAccordingTo(java.util.Comparator.reverseOrder());
+    }
+
+    @Test
+    @DisplayName("Workspace 检索：候选来自本人 + 空间已授权共享，非成员被拒")
+    void search_shouldUseWorkspaceAwareCandidates() {
+        when(connectionRepository.findOwned(CONNECTION_ID, USER_ID)).thenReturn(Optional.of(new ConnectionConfig(
+                CONNECTION_ID, USER_ID, "A 商店库", "mysql", "127.0.0.1", 3306,
+                "sql_demo_a", "demo_a_reader", "cipher", NOW, NOW)));
+        when(workspaceAccessPolicy.canAccessKnowledgeScope(100L, USER_ID)).thenReturn(true);
+        when(repository.searchCandidatesInWorkspace(USER_ID, CONNECTION_ID, 100L)).thenReturn(List.of(
+                entry(1L, null, KnowledgeType.GLOSSARY, "有效订单", "已支付且未取消的订单", 1),
+                entry(2L, null, KnowledgeType.GLOSSARY, "共享术语", "空间共享的订单口径", 1)));
+
+        KnowledgeSearchResponse result = service.search(USER_ID, CONNECTION_ID, "有效订单", 100L);
+
+        assertThat(result.items()).extracting(KnowledgeSearchResponse.Hit::id).contains(1L);
     }
 
     @Test

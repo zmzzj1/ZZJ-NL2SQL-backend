@@ -84,6 +84,26 @@ public class KnowledgeRepository {
                 connectionId);
     }
 
+    /**
+     * 召回候选（Workspace 感知）：本人知识 + 空间内已授权共享的知识。
+     * 数据库级 JOIN resource_grants 过滤，确保跨空间/未授权知识不进入候选（不先取全库再隐藏）。
+     * 本人知识的连接作用域仍匹配（connection_id IS NULL 或等于当前连接）；
+     * 空间共享知识视为空间级知识，不受检索者 connection 作用域限制（由 ResourceGrant 授权决定可见性）。
+     */
+    public List<KnowledgeEntry> searchCandidatesInWorkspace(Long userId, Long connectionId, Long workspaceId) {
+        String sql = "SELECT k.id, k.user_id, k.connection_id, k.source_type, k.title, k.content,"
+                + " k.status, k.version, k.created_at, k.updated_at"
+                + " FROM knowledge_entries k"
+                + " WHERE k.status = 'ACTIVE'"
+                + " AND ("
+                + "   (k.user_id = ? AND (k.connection_id IS NULL OR k.connection_id = ?))"
+                + "   OR EXISTS (SELECT 1 FROM resource_grants g"
+                + "              WHERE g.resource_type = 'KNOWLEDGE' AND g.resource_id = k.id"
+                + "                AND g.workspace_id = ? AND g.status = 'ACTIVE')"
+                + " )";
+        return jdbcTemplate.query(sql, (resultSet, rowNum) -> map(resultSet), userId, connectionId, workspaceId);
+    }
+
     public int update(Long id, Long userId, Long connectionId, String title, String content, int newVersion) {
         return jdbcTemplate.update("""
                         UPDATE knowledge_entries

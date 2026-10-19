@@ -9,6 +9,7 @@ import com.queryforge.shared.error.ApiException;
 import com.queryforge.shared.error.ErrorCode;
 import com.queryforge.datasource.repository.ConnectionRepository;
 import com.queryforge.knowledge.KnowledgeRepository;
+import com.queryforge.workspace.WorkspaceAccessPolicy;
 import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -30,10 +31,13 @@ public class KnowledgeService {
 
     private final KnowledgeRepository repository;
     private final ConnectionRepository connectionRepository;
+    private final WorkspaceAccessPolicy workspaceAccessPolicy;
 
-    public KnowledgeService(KnowledgeRepository repository, ConnectionRepository connectionRepository) {
+    public KnowledgeService(KnowledgeRepository repository, ConnectionRepository connectionRepository,
+                            WorkspaceAccessPolicy workspaceAccessPolicy) {
         this.repository = repository;
         this.connectionRepository = connectionRepository;
+        this.workspaceAccessPolicy = workspaceAccessPolicy;
     }
 
     public KnowledgeEntryResponse create(Long userId, KnowledgeEntryRequest request) {
@@ -66,12 +70,27 @@ public class KnowledgeService {
 
     /** 服务端鉴权范围内的检索；命中返回 sourceId/version/score/snippet。 */
     public KnowledgeSearchResponse search(Long userId, Long connectionId, String query) {
+        return search(userId, connectionId, query, null);
+    }
+
+    /**
+     * Workspace 感知检索：传入 workspaceId 时，候选 = 本人知识 + 空间内已授权共享知识。
+     * 权限在数据库级候选筛选中生效（见 KnowledgeRepository.searchCandidatesInWorkspace），
+     * 非成员访问空间抛出 WORKSPACE_NOT_FOUND。
+     */
+    public KnowledgeSearchResponse search(Long userId, Long connectionId, String query, Long workspaceId) {
         validateScope(userId, connectionId);
         String normalized = normalize(query);
         if (normalized.isBlank()) {
             return new KnowledgeSearchResponse(List.of(), RETRIEVAL_MODE);
         }
-        List<KnowledgeEntry> candidates = repository.searchCandidates(userId, connectionId);
+        List<KnowledgeEntry> candidates;
+        if (workspaceId != null) {
+            workspaceAccessPolicy.canAccessKnowledgeScope(workspaceId, userId);
+            candidates = repository.searchCandidatesInWorkspace(userId, connectionId, workspaceId);
+        } else {
+            candidates = repository.searchCandidates(userId, connectionId);
+        }
         List<KnowledgeSearchResponse.Hit> hits = new ArrayList<>();
         for (KnowledgeEntry entry : candidates) {
             double score = score(entry, normalized);
@@ -163,6 +182,11 @@ public class KnowledgeService {
 
     private KnowledgeEntry requireOwned(Long id, Long userId) {
         return repository.findOwned(id, userId).orElseThrow(KnowledgeService::notFound);
+    }
+
+    /** 供索引重建等内部用途：校验归属并返回条目。 */
+    public KnowledgeEntry requireOwnedEntry(Long id, Long userId) {
+        return requireOwned(id, userId);
     }
 
     private static KnowledgeEntryResponse toResponse(KnowledgeEntry entry) {

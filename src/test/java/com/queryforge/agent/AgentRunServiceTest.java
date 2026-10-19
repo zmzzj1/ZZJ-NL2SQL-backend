@@ -7,6 +7,7 @@ import com.queryforge.query.execution.SqlExecutionService;
 import com.queryforge.config.ResolvedAgentConfig;
 import com.queryforge.config.RuntimeConfigResolver;
 import com.queryforge.skill.SkillService;
+import com.queryforge.memory.MemoryService;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -99,6 +100,9 @@ class AgentRunServiceTest {
     @Mock
     private SkillService skillService;
 
+    @Mock
+    private MemoryService memoryService;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private AgentRunService service;
 
@@ -107,7 +111,7 @@ class AgentRunServiceTest {
         service = new AgentRunService(
                 repository, conversationService, connectionService, planner, sqlAssistant,
                 executionService, guard, new AgentProperties(3, 2, 6000, 12), objectMapper,
-                managerRouter, knowledgeService, configResolver, skillService);
+                managerRouter, knowledgeService, configResolver, skillService, memoryService);
     }
 
     @Test
@@ -123,7 +127,7 @@ class AgentRunServiceTest {
                 .thenReturn(RUN_ID);
 
         AgentRunService.PreparedRun prepared = service.prepareStart(
-                USER_ID, new CreateAgentRunRequest(CONVERSATION_ID, CONNECTION_ID, QUESTION, null, null, null));
+                USER_ID, new CreateAgentRunRequest(CONVERSATION_ID, CONNECTION_ID, QUESTION, null, null, null, null));
 
         assertThat(prepared.runId()).isEqualTo(RUN_ID);
         assertThat(prepared.database()).isEqualTo("sql_demo_a");
