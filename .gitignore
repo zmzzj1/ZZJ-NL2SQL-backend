@@ -16,3 +16,8 @@ docs/P0-B01-acceptance.md
 docs/*-acceptance.md
 docs/*-development-guide*.md
 docs/evidence/
+
+# local P6 acceptance / evidence artifacts
+tools/p6-acceptance.py
+tools/p6-e2e.py
+tools/p6-e2e-out/

@@ -1,6 +1,6 @@
 # QueryForge 后端（真实用户与多数据源）
 
-Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行和业务知识检索。
+Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索，以及 P6 新增的隔离数据分析、HTML 报告、MCP 工具接入和可视化工作流。
 
 ## 环境要求
 
@@ -15,6 +15,10 @@ Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL �
 - Agent 多步规划、逐步确认执行、限次 SQL 修复、取消与运行恢复。
 - Manager 结构化路由、多角色轨迹和 LLM 调用次数限制。
 - 业务知识 CRUD、按连接鉴权检索和会话记忆摘要。
+- 受控工具注册表（只读工具 + 审计）、真实 MCP stdio 客户端（预配置白名单服务）。
+- 隔离 Python 数据分析（Docker 沙箱，不可用时拒绝回退宿主机）、内置确定性分析器。
+- 结构化图表（table/bar/line/pie）与净化 HTML 报告（CSP + 沙箱预览）。
+- 可视化工作流 DAG（校验、版本化、串行执行、SQL 审批暂停/恢复、SSE）。
 
 ## 数据库初始化
 
@@ -29,6 +33,7 @@ mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/re
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/04-conversations-history.sql
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/05-agent-runs.sql
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/06-knowledge-memory.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/07-p6-tools-analysis-report-mcp-workflow.sql
 ```
 
 创建账号（密码由本地管理员设置，不提交仓库）：
@@ -68,6 +73,10 @@ APP_ENCRYPTION_KEY=<base64-32-bytes>
 | `SQL_MAX_ROWS` / `SQL_QUERY_TIMEOUT_SECONDS` | 行数/超时限制 |
 | `AGENT_MAX_STEPS` / `AGENT_MAX_REPAIRS` | Agent 最大步骤数/单步最大修复次数 |
 | `AGENT_MAX_PLAN_CHARS` / `AGENT_MAX_LLM_CALLS` | 计划长度/单次运行 LLM 调用上限 |
+| `ANALYSIS_MAX_INPUT_ROWS/BYTES/CODE_CHARS` | 分析输入行数/字节/代码字符上限 |
+| `ANALYSIS_TIMEOUT_SECONDS` / `ANALYSIS_MEMORY_BYTES` / `ANALYSIS_CPUS` | 沙箱超时/内存/CPU 限额 |
+| `ANALYSIS_SANDBOX_IMAGE` / `ANALYSIS_SANDBOX_COMMAND` | 沙箱镜像/入口命令 |
+| `MCP_ECHO_SCRIPT` | 本地 MCP 测试服务脚本路径（默认 `tools/mcp-echo-server.mjs`） |
 
 ## 启动与测试
 
@@ -103,6 +112,12 @@ mvn spring-boot:run
 | POST | `/api/v1/agent/runs/{runId}/cancel` | 取消运行 |
 | GET | `/api/v1/agent/runs`、`/{runId}`、`/latest` | 查询与恢复运行 |
 | POST/GET/PUT/DELETE | `/api/v1/knowledge/**` | 业务知识维护与关键词检索 |
+| GET/POST | `/api/v1/tools`、`/api/v1/tools/invoke` | 只读工具目录与调用 |
+| POST/GET | `/api/v1/analysis/runs/**` | Python 隔离分析（SSE）与详情 |
+| POST/GET/DELETE | `/api/v1/reports`、`/api/v1/reports/{id}`、`/{id}/preview` | 报告生成、读取与净化预览 |
+| GET/POST | `/api/v1/mcp/servers`、`.../{name}/test`、`.../{tool}/call` | MCP 预配置服务发现与只读调用 |
+| POST/GET/PUT/DELETE | `/api/v1/workflows`、`/api/v1/workflows/{id}` | 工作流 DAG 定义与版本化 |
+| POST | `/api/v1/workflows/{id}/runs/stream`、`.../approve/stream` | 工作流运行与审批续跑 |
 
 ## 安全边界
 
@@ -112,6 +127,10 @@ mvn spring-boot:run
 - 所有连接查询带 `user_id`；跨用户资源统一 404。
 - SQL 执行：JSqlParser + 危险函数/系统库/跨库拒绝 + 只读账号 + `SET SESSION TRANSACTION READ ONLY` + 行数/超时。
 - 模型输出不会自动执行，必须用户显式提交。
+- Python 分析代码仅在隔离 Docker 容器执行（非 root、禁网、只读、去 capabilities、限额）；沙箱不可用时拒绝执行，不回退宿主机。
+- 分析输入仅来自服务端重新校验权限 + SQL Guard 后重新执行的真实受限结果，不接受前端伪造数组。
+- HTML 报告经白名单净化 + CSP + 沙箱 iframe 预览，禁止脚本执行。
+- MCP 仅连预配置白名单服务，不提供任意 URL/命令注册；工具输出视为不可信数据。
 
 ## 本地模型测试桩
 
@@ -125,4 +144,4 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn s
 
 ## 测试
 
-- `mvn test`：103 个自动化用例，包含 Controller 切片与 Service 单元测试。
+- `mvn test`：123 个自动化用例，包含 Controller 切片、Service 单元测试与 P6（分析器/报告净化/工具注册表/工作流图校验）单测。

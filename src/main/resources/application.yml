@@ -52,9 +52,25 @@ app:
     max-repairs: ${AGENT_MAX_REPAIRS:2}
     max-plan-chars: ${AGENT_MAX_PLAN_CHARS:6000}
     max-llm-calls: ${AGENT_MAX_LLM_CALLS:12}
+  analysis:
+    max-input-rows: ${ANALYSIS_MAX_INPUT_ROWS:200}
+    max-input-bytes: ${ANALYSIS_MAX_INPUT_BYTES:262144}
+    max-code-chars: ${ANALYSIS_MAX_CODE_CHARS:4000}
+    timeout-seconds: ${ANALYSIS_TIMEOUT_SECONDS:20}
+    memory-bytes: ${ANALYSIS_MEMORY_BYTES:268435456}
+    cpus: ${ANALYSIS_CPUS:1.0}
+    sandbox-image: ${ANALYSIS_SANDBOX_IMAGE:python:3.12-slim}
+    sandbox-command: ${ANALYSIS_SANDBOX_COMMAND:python}
+  mcp:
+    servers:
+      - name: local-echo
+        transport: stdio
+        command: node
+        args:
+          - ${MCP_ECHO_SCRIPT:tools/mcp-echo-server.mjs}
 
 logging:
   level:
-    com.queryforge.platform: INFO
+    com.queryforge: INFO
     org.springframework.jdbc.core: WARN
     org.springframework.security: WARN
