@@ -56,7 +56,9 @@ public class ConnectionService {
     }
 
     public ConnectionResponse create(Long userId, ConnectionRequest request) {
-        ValidatedConnection validated = validate(request, true);
+        ValidatedConnection validated = validate(request);
+        // 前端不填密码时序列化为 null；无密码账号统一按空串加密存储。
+        String password = validated.password() == null ? "" : validated.password();
         Long id = repository.insert(new ConnectionConfig(
                 null,
                 userId,
@@ -66,7 +68,7 @@ public class ConnectionService {
                 validated.port(),
                 validated.database(),
                 validated.username(),
-                cipher.encrypt(validated.password()),
+                cipher.encrypt(password),
                 null,
                 null));
         return new ConnectionResponse(id, validated.name(), SUPPORTED_ENGINE, validated.host(),
@@ -75,7 +77,7 @@ public class ConnectionService {
 
     public ConnectionResponse update(Long userId, Long id, ConnectionRequest request) {
         ConnectionConfig existing = requireOwned(id, userId);
-        ValidatedConnection validated = validate(request, false);
+        ValidatedConnection validated = validate(request);
         String ciphertext = (validated.password() == null || validated.password().isBlank())
                 ? existing.passwordCiphertext()
                 : cipher.encrypt(validated.password());
@@ -120,10 +122,17 @@ public class ConnectionService {
         }
     }
 
+    /** 只读取展示信息，不解密或使用密码。 */
+    public ConnectionSummary summary(Long userId, Long id) {
+        ConnectionConfig config = requireOwned(id, userId);
+        return new ConnectionSummary(config.id(), config.name(), config.database());
+    }
+
     public ConnectionTarget target(Long userId, Long id) {
         ConnectionConfig config = requireOwned(id, userId);
         return new ConnectionTarget(
                 config.id(),
+                config.name(),
                 config.host(),
                 config.port(),
                 config.database(),
@@ -159,14 +168,14 @@ public class ConnectionService {
         return repository.findOwned(id, userId).orElseThrow(ConnectionService::notFound);
     }
 
-    private ValidatedConnection validate(ConnectionRequest request, boolean passwordRequired) {
+    /**
+     * 密码允许为空：本地开发环境的 root 等账号本身没有密码。
+     * 编辑时空密码表示沿用服务端已保存的密文，不会把密码清空。
+     */
+    private ValidatedConnection validate(ConnectionRequest request) {
         String engine = request.engine() == null ? "" : request.engine().trim().toLowerCase(Locale.ROOT);
         if (!SUPPORTED_ENGINE.equals(engine)) {
             throw new ApiException(ErrorCode.VALIDATION_ERROR, HttpStatus.BAD_REQUEST, "当前仅支持 MySQL 连接");
-        }
-        String password = request.password();
-        if (passwordRequired && (password == null || password.isBlank())) {
-            throw new ApiException(ErrorCode.VALIDATION_ERROR, HttpStatus.BAD_REQUEST, "连接密码不能为空");
         }
         return new ValidatedConnection(
                 request.name().trim(),
@@ -174,7 +183,7 @@ public class ConnectionService {
                 policy.validatePort(request.port()),
                 policy.validateIdentifier(request.database(), "数据库名"),
                 policy.validateIdentifier(request.username(), "用户名"),
-                password);
+                request.password());
     }
 
     private static ConnectionResponse toResponse(ConnectionConfig config) {
@@ -191,6 +200,10 @@ public class ConnectionService {
 
     private static ApiException notFound() {
         return new ApiException(ErrorCode.CONNECTION_NOT_FOUND, HttpStatus.NOT_FOUND, "连接不存在或无权访问");
+    }
+
+    /** 会话/历史/Run 需要的数据源展示快照。 */
+    public record ConnectionSummary(Long id, String name, String database) {
     }
 
     private record ValidatedConnection(

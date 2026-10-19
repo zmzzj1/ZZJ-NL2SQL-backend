@@ -47,6 +47,11 @@ app:
   sql:
     max-rows: ${SQL_MAX_ROWS:200}
     query-timeout-seconds: ${SQL_QUERY_TIMEOUT_SECONDS:5}
+  agent:
+    max-steps: ${AGENT_MAX_STEPS:3}
+    max-repairs: ${AGENT_MAX_REPAIRS:2}
+    max-plan-chars: ${AGENT_MAX_PLAN_CHARS:6000}
+    max-llm-calls: ${AGENT_MAX_LLM_CALLS:12}
 
 logging:
   level:

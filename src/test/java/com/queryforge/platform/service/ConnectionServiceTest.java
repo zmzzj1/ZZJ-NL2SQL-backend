@@ -77,6 +77,21 @@ class ConnectionServiceTest {
     }
 
     @Test
+    @DisplayName("无密码账号（如本地 root）允许空密码创建")
+    void create_shouldAllowBlankPassword() {
+        stubPolicy();
+        when(cipher.encrypt("")).thenReturn("cipher-of-empty");
+        when(repository.insert(any())).thenReturn(CONNECTION_ID);
+
+        ConnectionResponse response = service.create(USER_ID, request("mysql", ""));
+
+        ArgumentCaptor<ConnectionConfig> captor = ArgumentCaptor.forClass(ConnectionConfig.class);
+        verify(repository).insert(captor.capture());
+        assertThat(captor.getValue().passwordCiphertext()).isEqualTo("cipher-of-empty");
+        assertThat(response.hasPassword()).isTrue();
+    }
+
+    @Test
     @DisplayName("PostgreSQL 明确拒绝，不伪造支持")
     void create_shouldRejectUnsupportedEngine() {
         assertThatThrownBy(() -> service.create(USER_ID, request("postgresql", "secret")))

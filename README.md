@@ -1,6 +1,6 @@
 # QueryForge 后端（真实用户与多数据源）
 
-Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、Schema 读取、SSE SQL 生成与按数据源只读执行。
+Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行和业务知识检索。
 
 ## 环境要求
 
@@ -8,6 +8,13 @@ Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL �
 - Maven 3.9+（验证使用 3.9.1）
 - MySQL 8（验证使用 8.4.11）
 - 可选：OpenAI 兼容模型服务
+
+## 主要能力
+
+- 会话、消息和查询历史持久化，资源按登录用户隔离。
+- Agent 多步规划、逐步确认执行、限次 SQL 修复、取消与运行恢复。
+- Manager 结构化路由、多角色轨迹和 LLM 调用次数限制。
+- 业务知识 CRUD、按连接鉴权检索和会话记忆摘要。
 
 ## 数据库初始化
 
@@ -17,6 +24,11 @@ mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/re
 
 # 两个隔离测试库：sql_demo_a(shop_*) / sql_demo_b(blog_*)
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/03-test-databases.sql
+
+# 按版本顺序执行管理库增量脚本
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/04-conversations-history.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/05-agent-runs.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/06-knowledge-memory.sql
 ```
 
 创建账号（密码由本地管理员设置，不提交仓库）：
@@ -54,6 +66,8 @@ APP_ENCRYPTION_KEY=<base64-32-bytes>
 | `CONNECTION_ALLOWED_PORTS` | 允许连接的端口，默认 `3306,3307,3308,3309,3310` |
 | `LLM_BASE_URL/API_KEY/MODEL` | 模型配置；无 Key 时生成返回 503 |
 | `SQL_MAX_ROWS` / `SQL_QUERY_TIMEOUT_SECONDS` | 行数/超时限制 |
+| `AGENT_MAX_STEPS` / `AGENT_MAX_REPAIRS` | Agent 最大步骤数/单步最大修复次数 |
+| `AGENT_MAX_PLAN_CHARS` / `AGENT_MAX_LLM_CALLS` | 计划长度/单次运行 LLM 调用上限 |
 
 ## 启动与测试
 
@@ -78,8 +92,17 @@ mvn spring-boot:run
 | PATCH/DELETE | `/api/v1/connections/{id}` | 修改/删除 |
 | POST | `/api/v1/connections/{id}/test` | 真实连通性测试 |
 | GET | `/api/v1/connections/{id}/schema` | JDBC 元数据 |
+| GET/POST | `/api/v1/conversations` | 会话列表/新建 |
+| GET/DELETE | `/api/v1/conversations/{id}` | 会话详情/删除 |
+| GET/DELETE | `/api/v1/query-history[/{id}]` | 查询历史列表、详情与删除 |
 | POST | `/api/v1/sql/generate/stream` | SSE，`connectionId` 决定 Schema |
 | POST | `/api/v1/sql/execute` | 只读执行，`connectionId + sql` |
+| POST | `/api/v1/agent/runs/stream` | 创建并流式运行 Agent |
+| POST | `/api/v1/agent/runs/{runId}/steps/{stepId}/approve/stream` | 确认步骤并继续运行 |
+| POST | `/api/v1/agent/runs/{runId}/steps/{stepId}/reject` | 拒绝步骤 |
+| POST | `/api/v1/agent/runs/{runId}/cancel` | 取消运行 |
+| GET | `/api/v1/agent/runs`、`/{runId}`、`/latest` | 查询与恢复运行 |
+| POST/GET/PUT/DELETE | `/api/v1/knowledge/**` | 业务知识维护与关键词检索 |
 
 ## 安全边界
 
@@ -102,11 +125,4 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn s
 
 ## 测试
 
-- `mvn verify`：47 个自动化用例，包含 Controller 切片与 Service 单元测试。
-
-## 已知限制
-
-- 真实 LLM 未验证（无 Key）。
-- 仅 MySQL；PostgreSQL 明确拒绝。
-- 目标连接按请求建立，未池化；高并发未压测。
-- Session 存内存，重启后需重新登录；连接配置持久化。
+- `mvn test`：103 个自动化用例，包含 Controller 切片与 Service 单元测试。

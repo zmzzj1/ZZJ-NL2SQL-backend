@@ -2,6 +2,10 @@ package com.queryforge.platform.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -27,6 +31,8 @@ class SqlGenerationServiceTest {
 
     private static final long USER_ID = 1L;
     private static final long CONNECTION_ID = 10L;
+    private static final long CONVERSATION_ID = 20L;
+    private static final long MESSAGE_ID = 30L;
     private static final String USER_INPUT = "统计订单数量";
     private static final String SCHEMA = "数据库：sql_demo_a\nshop_orders(id BIGINT, amount DECIMAL)";
 
@@ -34,6 +40,9 @@ class SqlGenerationServiceTest {
 
     @Mock
     private ConnectionService connectionService;
+
+    @Mock
+    private ConversationService conversationService;
 
     private FakeLlmClient client;
 
@@ -99,11 +108,58 @@ class SqlGenerationServiceTest {
         verifyNoInteractions(connectionService);
     }
 
+    @Test
+    @DisplayName("收到 complete 后把完整 SQL 标记为 COMPLETED")
+    void writeStream_shouldPersistCompletedMessage() throws Exception {
+        when(connectionService.schemaContext(USER_ID, CONNECTION_ID)).thenReturn(SCHEMA);
+        ConversationService.GenerationTicket ticket =
+                new ConversationService.GenerationTicket(CONVERSATION_ID, MESSAGE_ID);
+        when(conversationService.beginGeneration(
+                USER_ID, CONVERSATION_ID, CONNECTION_ID, USER_INPUT, "req-1")).thenReturn(ticket);
+        client.lines = List.of(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"SELECT \"}}]}",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"1\"}}]}",
+                "data: [DONE]");
+
+        SqlGenerationService service = serviceWith("test-key");
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try (SqlGenerationService.PreparedGeneration prepared =
+                     service.prepare(conversationRequest(), USER_ID, "req-1")) {
+            service.writeStream(prepared, output);
+        }
+
+        verify(conversationService).completeGeneration(ticket, "SELECT 1");
+        verify(conversationService, never()).failGeneration(any(), anyString());
+        verify(conversationService, never()).cancelGeneration(any(), anyString());
+    }
+
+    @Test
+    @DisplayName("模型没有输出时标记 FAILED，不形成假成功记录")
+    void writeStream_shouldPersistFailedMessage_whenNoDelta() throws Exception {
+        when(connectionService.schemaContext(USER_ID, CONNECTION_ID)).thenReturn(SCHEMA);
+        ConversationService.GenerationTicket ticket =
+                new ConversationService.GenerationTicket(CONVERSATION_ID, MESSAGE_ID);
+        when(conversationService.beginGeneration(
+                USER_ID, CONVERSATION_ID, CONNECTION_ID, USER_INPUT, "req-1")).thenReturn(ticket);
+        client.lines = List.of("data: [DONE]");
+
+        SqlGenerationService service = serviceWith("test-key");
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try (SqlGenerationService.PreparedGeneration prepared =
+                     service.prepare(conversationRequest(), USER_ID, "req-1")) {
+            service.writeStream(prepared, output);
+        }
+
+        verify(conversationService).failGeneration(ticket, "");
+        verify(conversationService, never()).completeGeneration(any(), anyString());
+    }
+
     private SqlGenerationService serviceWith(String apiKey) {
         LlmProperties properties = new LlmProperties(
                 "http://127.0.0.1:9099/v1", apiKey, "test-model",
                 Duration.ofSeconds(1), Duration.ofSeconds(2));
-        return new SqlGenerationService(properties, client, objectMapper, connectionService);
+        return new SqlGenerationService(
+                properties, client, objectMapper, connectionService, conversationService);
     }
 
     private String generate(SqlGenerationService service) throws Exception {
@@ -116,7 +172,11 @@ class SqlGenerationServiceTest {
     }
 
     private static GenerateSqlRequest request() {
-        return new GenerateSqlRequest(USER_INPUT, CONNECTION_ID, "default");
+        return new GenerateSqlRequest(USER_INPUT, CONNECTION_ID, null, "default");
+    }
+
+    private static GenerateSqlRequest conversationRequest() {
+        return new GenerateSqlRequest(USER_INPUT, CONNECTION_ID, CONVERSATION_ID, "default");
     }
 
     private static int indexOf(String text, String needle) {
@@ -134,6 +194,12 @@ class SqlGenerationServiceTest {
         public LlmStream open(String userInput, String schemaContext) {
             opened = true;
             this.schemaContext = schemaContext;
+            return new LlmStream(lines.stream());
+        }
+
+        @Override
+        public LlmStream openChat(String systemPrompt, String userPrompt) {
+            opened = true;
             return new LlmStream(lines.stream());
         }
     }

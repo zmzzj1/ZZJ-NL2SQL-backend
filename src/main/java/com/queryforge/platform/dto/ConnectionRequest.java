@@ -6,7 +6,8 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 
 /**
- * 新建/修改连接共用请求。创建时 password 必填，修改时留空表示沿用原密文。
+ * 新建/修改连接共用请求。密码允许为空（无密码账号，如本地 root）；
+ * 修改时留空表示沿用原密文，不会清空密码。
  */
 public record ConnectionRequest(
         @NotBlank(message = "连接名称不能为空")

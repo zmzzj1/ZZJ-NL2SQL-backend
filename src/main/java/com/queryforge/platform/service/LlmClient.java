@@ -7,4 +7,10 @@ package com.queryforge.platform.service;
 public interface LlmClient {
 
     LlmStream open(String userInput, String schemaContext);
+
+    /**
+     * 通用流式对话：Agent 的规划、SQL 生成、修复与总结各自提供 system prompt。
+     * 返回值同为上游 SSE 行流，由调用方决定是否转发或聚合。
+     */
+    LlmStream openChat(String systemPrompt, String userPrompt);
 }

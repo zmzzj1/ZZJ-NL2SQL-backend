@@ -59,7 +59,27 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
      */
     @Override
     public LlmStream open(String userInput, String schemaContext) {
-        String body = buildRequestBody(userInput, schemaContext);
+        String effectiveSchema = (schemaContext == null || schemaContext.isBlank())
+                ? "（未提供可用的表结构）"
+                : schemaContext;
+        String userPrompt = """
+                当前连接数据库的 Schema（只读）：
+                %s
+
+                用户问题：
+                %s
+
+                请只输出一条 MySQL SELECT 语句。
+                """.formatted(effectiveSchema, userInput);
+        return openChat(SYSTEM_PROMPT, userPrompt);
+    }
+
+    /**
+     * 建立上游流。网络或鉴权失败会在响应开始前抛出，便于返回标准 JSON 错误。
+     */
+    @Override
+    public LlmStream openChat(String systemPrompt, String userPrompt) {
+        String body = buildRequestBody(systemPrompt, userPrompt);
         HttpRequest request = HttpRequest.newBuilder(URI.create(properties.baseUrl() + "/chat/completions"))
                 .timeout(properties.requestTimeout())
                 .header("Authorization", "Bearer " + properties.apiKey())
@@ -87,26 +107,15 @@ public class OpenAiCompatibleLlmClient implements LlmClient {
         }
     }
 
-    private String buildRequestBody(String userInput, String schemaContext) {
-        String effectiveSchema = (schemaContext == null || schemaContext.isBlank())
-                ? "（未提供可用的表结构）"
-                : schemaContext;
+    private String buildRequestBody(String systemPrompt, String userPrompt) {
         ObjectNode root = objectMapper.createObjectNode();
         root.put("model", properties.model());
         root.put("stream", true);
         root.put("temperature", 0);
 
         ArrayNode messages = root.putArray("messages");
-        messages.addObject().put("role", "system").put("content", SYSTEM_PROMPT);
-        messages.addObject().put("role", "user").put("content", """
-                当前连接数据库的 Schema（只读）：
-                %s
-
-                用户问题：
-                %s
-
-                请只输出一条 MySQL SELECT 语句。
-                """.formatted(effectiveSchema, userInput));
+        messages.addObject().put("role", "system").put("content", systemPrompt);
+        messages.addObject().put("role", "user").put("content", userPrompt);
         return root.toString();
     }
 

@@ -3,6 +3,7 @@ package com.queryforge.platform.controller;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -93,5 +94,13 @@ class SqlGenerationControllerTest {
                                 """))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"));
+    }
+
+    @Test
+    @DisplayName("取消生成只收敛本人请求并返回 204")
+    void cancel_shouldReturnNoContent() throws Exception {
+        mockMvc.perform(post("/api/v1/sql/generate/req-1/cancel"))
+                .andExpect(status().isNoContent());
+        verify(service).cancel(1L, "req-1");
     }
 }

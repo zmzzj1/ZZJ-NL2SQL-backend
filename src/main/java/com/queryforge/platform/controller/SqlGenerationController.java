@@ -6,12 +6,15 @@ import com.queryforge.platform.security.AppUserPrincipal;
 import com.queryforge.platform.service.SqlGenerationService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
@@ -44,5 +47,14 @@ public class SqlGenerationController {
                 .header("Cache-Control", "no-cache, no-transform")
                 .header("X-Accel-Buffering", "no")
                 .body(body);
+    }
+
+    /** 客户端取消：只把本人仍在生成中的消息标记为 CANCELED。 */
+    @PostMapping("/generate/{requestId}/cancel")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void cancel(
+            @AuthenticationPrincipal AppUserPrincipal principal,
+            @PathVariable String requestId) {
+        service.cancel(principal.id(), requestId);
     }
 }

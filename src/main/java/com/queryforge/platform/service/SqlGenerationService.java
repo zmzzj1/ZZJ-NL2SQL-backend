@@ -17,7 +17,7 @@ import org.springframework.stereotype.Service;
 
 /**
  * 负责把上游模型的增量文本改写成本项目约定的 start/delta/complete/error 事件。
- * 生成阶段不接触业务数据库。
+ * 生成阶段不接触业务数据库；会话消息状态只在真实完成/失败/取消时落库。
  */
 @Service
 public class SqlGenerationService {
@@ -28,20 +28,24 @@ public class SqlGenerationService {
     private final LlmClient llmClient;
     private final ObjectMapper objectMapper;
     private final ConnectionService connectionService;
+    private final ConversationService conversationService;
 
     public SqlGenerationService(
             LlmProperties properties,
             LlmClient llmClient,
             ObjectMapper objectMapper,
-            ConnectionService connectionService) {
+            ConnectionService connectionService,
+            ConversationService conversationService) {
         this.properties = properties;
         this.llmClient = llmClient;
         this.objectMapper = objectMapper;
         this.connectionService = connectionService;
+        this.conversationService = conversationService;
     }
 
     /**
-     * 在写入 SSE 响应之前完成配置与上游连接检查；失败时仍可返回标准 JSON 错误。
+     * 在写入 SSE 响应之前完成配置、Schema 与上游连接检查；失败时仍可返回标准 JSON 错误。
+     * 传入 conversationId 时，先持久化用户问题与 IN_PROGRESS 助手消息。
      */
     public PreparedGeneration prepare(GenerateSqlRequest request, Long userId, String requestId) {
         if (!properties.configured()) {
@@ -50,35 +54,64 @@ public class SqlGenerationService {
                     HttpStatus.SERVICE_UNAVAILABLE,
                     "模型服务未配置：请在服务端设置 LLM_API_KEY");
         }
+        String question = request.userInput().trim();
         String schemaContext = connectionService.schemaContext(userId, request.connectionId());
-        LlmStream stream = llmClient.open(request.userInput().trim(), schemaContext);
-        return new PreparedGeneration(requestId, stream);
+        ConversationService.GenerationTicket ticket = request.conversationId() == null
+                ? null
+                : conversationService.beginGeneration(
+                        userId, request.conversationId(), request.connectionId(), question, requestId);
+
+        LlmStream stream;
+        try {
+            stream = llmClient.open(question, schemaContext);
+        } catch (RuntimeException ex) {
+            if (ticket != null) {
+                try {
+                    conversationService.failGeneration(ticket, "");
+                } catch (RuntimeException persistFailure) {
+                    log.error("conversation_message_fail_persist_failed requestId={}",
+                            requestId, persistFailure);
+                }
+            }
+            throw ex;
+        }
+        return new PreparedGeneration(requestId, stream, ticket);
+    }
+
+    /** 前端取消生成时调用；与断流检测互为兜底，重复调用无副作用。 */
+    public void cancel(Long userId, String requestId) {
+        conversationService.cancelByRequestId(userId, requestId);
     }
 
     public void writeStream(PreparedGeneration prepared, OutputStream outputStream) {
         SseEventWriter writer = new SseEventWriter(outputStream, objectMapper);
+        StringBuilder sql = new StringBuilder();
         boolean startSent = false;
         try (prepared) {
             writer.event("start", new SqlStreamEvents.Start(prepared.requestId()));
             startSent = true;
 
-            int deltaCount = relayDeltas(prepared, writer);
+            int deltaCount = relayDeltas(prepared, writer, sql);
             if (deltaCount == 0) {
                 throw new LlmStreamException("模型未返回任何内容");
             }
             writer.event("complete", new SqlStreamEvents.Complete(prepared.requestId()));
+            persistCompletion(prepared, sql.toString());
         } catch (IOException ex) {
             // 客户端主动取消或断开：停止读取上游，不尝试再写任何事件。
             log.info("sse_client_closed requestId={} reason={}", prepared.requestId(), ex.getMessage());
+            persistCancellation(prepared, sql.toString());
         } catch (RuntimeException ex) {
             log.warn("sse_stream_failed requestId={} message={}", prepared.requestId(), ex.getMessage());
+            persistFailure(prepared, sql.toString());
             if (startSent) {
                 writeErrorQuietly(writer, prepared.requestId());
             }
         }
     }
 
-    private int relayDeltas(PreparedGeneration prepared, SseEventWriter writer) throws IOException {
+    private int relayDeltas(PreparedGeneration prepared, SseEventWriter writer, StringBuilder sql)
+            throws IOException {
         Iterator<String> lines = prepared.stream().lineIterator();
         int deltaCount = 0;
         while (lines.hasNext()) {
@@ -103,6 +136,7 @@ public class SqlGenerationService {
             }
             String text = extractDeltaText(node);
             if (!text.isEmpty()) {
+                sql.append(text);
                 writer.event("delta", new SqlStreamEvents.Delta(text));
                 deltaCount++;
             }
@@ -131,6 +165,43 @@ public class SqlGenerationService {
         return text;
     }
 
+    private void persistCompletion(PreparedGeneration prepared, String sql) {
+        if (prepared.ticket() == null) {
+            return;
+        }
+        try {
+            conversationService.completeGeneration(prepared.ticket(), sql);
+        } catch (RuntimeException ex) {
+            // 客户端已收到 complete，不能因为持久化失败再补发 error 事件。
+            log.error("conversation_message_complete_persist_failed requestId={}",
+                    prepared.requestId(), ex);
+        }
+    }
+
+    private void persistCancellation(PreparedGeneration prepared, String partialSql) {
+        if (prepared.ticket() == null) {
+            return;
+        }
+        try {
+            conversationService.cancelGeneration(prepared.ticket(), partialSql);
+        } catch (RuntimeException ex) {
+            log.error("conversation_message_cancel_persist_failed requestId={}",
+                    prepared.requestId(), ex);
+        }
+    }
+
+    private void persistFailure(PreparedGeneration prepared, String partialSql) {
+        if (prepared.ticket() == null) {
+            return;
+        }
+        try {
+            conversationService.failGeneration(prepared.ticket(), partialSql);
+        } catch (RuntimeException ex) {
+            log.error("conversation_message_fail_persist_failed requestId={}",
+                    prepared.requestId(), ex);
+        }
+    }
+
     private void writeErrorQuietly(SseEventWriter writer, String requestId) {
         try {
             writer.event("error", new SqlStreamEvents.StreamError(
@@ -143,16 +214,18 @@ public class SqlGenerationService {
     }
 
     /**
-     * 已建立的上游流 + 请求追踪 ID。由调用方负责关闭。
+     * 已建立的上游流 + 请求追踪 ID + 可选的会话消息。由调用方负责关闭。
      */
     public static final class PreparedGeneration implements AutoCloseable {
 
         private final String requestId;
         private final LlmStream stream;
+        private final ConversationService.GenerationTicket ticket;
 
-        PreparedGeneration(String requestId, LlmStream stream) {
+        PreparedGeneration(String requestId, LlmStream stream, ConversationService.GenerationTicket ticket) {
             this.requestId = requestId;
             this.stream = stream;
+            this.ticket = ticket;
         }
 
         public String requestId() {
@@ -161,6 +234,10 @@ public class SqlGenerationService {
 
         LlmStream stream() {
             return stream;
+        }
+
+        ConversationService.GenerationTicket ticket() {
+            return ticket;
         }
 
         @Override
