@@ -2,6 +2,9 @@ package com.queryforge.agent;
 import com.queryforge.conversation.ConversationService;
 import com.queryforge.datasource.ConnectionService;
 import com.queryforge.knowledge.KnowledgeService;
+import com.queryforge.agent.graph.AgentGraphStateService;
+import com.queryforge.agent.roles.AgentRole;
+import com.queryforge.agent.roles.RoleAssigner;
 import com.queryforge.query.execution.ReadOnlySqlGuard;
 import com.queryforge.query.execution.SqlExecutionService;
 import com.queryforge.config.ResolvedAgentConfig;
@@ -103,6 +106,12 @@ class AgentRunServiceTest {
     @Mock
     private MemoryService memoryService;
 
+    @Mock
+    private AgentGraphStateService graphStateService;
+
+    @Mock
+    private RoleAssigner roleAssigner;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private AgentRunService service;
 
@@ -111,7 +120,9 @@ class AgentRunServiceTest {
         service = new AgentRunService(
                 repository, conversationService, connectionService, planner, sqlAssistant,
                 executionService, guard, new AgentProperties(3, 2, 6000, 12), objectMapper,
-                managerRouter, knowledgeService, configResolver, skillService, memoryService);
+                managerRouter, knowledgeService, configResolver, skillService, memoryService,
+                graphStateService, roleAssigner);
+        org.mockito.Mockito.lenient().when(roleAssigner.assign(anyString())).thenReturn(AgentRole.DATA_ANALYST);
     }
 
     @Test

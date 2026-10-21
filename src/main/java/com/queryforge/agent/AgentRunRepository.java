@@ -214,6 +214,16 @@ public class AgentRunRepository {
                 stepId);
     }
 
+    /** P11：把 RoleAssigner 选定的专业角色持久化到步骤，使详情/刷新与前端流式角色一致。 */
+    public int updateStepRole(Long stepId, String role) {
+        return jdbcTemplate.update("""
+                        UPDATE agent_steps SET agent_role = ?, updated_at = ? WHERE id = ?
+                        """,
+                role,
+                LocalDateTime.now(),
+                stepId);
+    }
+
     /** 原子领取：只有仍处于待确认且版本一致的步骤会被置为 RUNNING。 */
     public int claimStep(Long runId, Long stepId, int sqlVersion) {
         return jdbcTemplate.update("""
@@ -370,5 +380,27 @@ public class AgentRunRepository {
                 resultSet.getString("result_summary"),
                 resultSet.getTimestamp("created_at").toLocalDateTime(),
                 resultSet.getTimestamp("updated_at").toLocalDateTime());
+    }
+
+    /** 写入/更新统一状态图检查点（P11）。state_revision 用作乐观并发保护。 */
+    public int upsertGraphCheckpoint(long runId, String graphStateJson, long stateRevision) {
+        return jdbcTemplate.update("""
+                        INSERT INTO agent_graph_checkpoints (run_id, graph_state_json, state_revision, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON DUPLICATE KEY UPDATE
+                            graph_state_json = VALUES(graph_state_json),
+                            state_revision = VALUES(state_revision),
+                            updated_at = VALUES(updated_at)
+                        """,
+                runId, graphStateJson, stateRevision, LocalDateTime.now(), LocalDateTime.now());
+    }
+
+    /** 读取最近一次确认的状态图 JSON；无则返回空（恢复失败安全，P1130）。 */
+    public Optional<String> findGraphCheckpointJson(long runId) {
+        List<String> rows = jdbcTemplate.query(
+                "SELECT graph_state_json FROM agent_graph_checkpoints WHERE run_id = ?",
+                (resultSet, rowNum) -> resultSet.getString(1),
+                runId);
+        return rows.stream().findFirst();
     }
 }

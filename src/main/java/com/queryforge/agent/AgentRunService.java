@@ -10,6 +10,16 @@ import com.queryforge.config.RuntimeConfigResolver;
 import com.queryforge.skill.SkillService;
 import com.queryforge.memory.MemoryService;
 import com.queryforge.memory.MemoryService.Scope;
+import com.queryforge.agent.context.ContextBudget;
+import com.queryforge.agent.context.ContextLayer;
+import com.queryforge.agent.context.ContextPriority;
+import com.queryforge.agent.context.ContextSegment;
+import com.queryforge.agent.context.LayeredContextBuilder;
+import com.queryforge.agent.context.LayeredContextResult;
+import com.queryforge.agent.context.TokenEstimator;
+import com.queryforge.agent.graph.AgentGraphStateService;
+import com.queryforge.agent.graph.GraphNode;
+import com.queryforge.agent.roles.RoleAssigner;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -81,6 +91,8 @@ public class AgentRunService {
     private final RuntimeConfigResolver configResolver;
     private final SkillService skillService;
     private final MemoryService memoryService;
+    private final AgentGraphStateService graphStateService;
+    private final RoleAssigner roleAssigner;
 
     public AgentRunService(
             AgentRunRepository repository,
@@ -96,7 +108,9 @@ public class AgentRunService {
             KnowledgeService knowledgeService,
             RuntimeConfigResolver configResolver,
             SkillService skillService,
-            MemoryService memoryService) {
+            MemoryService memoryService,
+            AgentGraphStateService graphStateService,
+            RoleAssigner roleAssigner) {
         this.repository = repository;
         this.conversationService = conversationService;
         this.connectionService = connectionService;
@@ -111,6 +125,8 @@ public class AgentRunService {
         this.configResolver = configResolver;
         this.skillService = skillService;
         this.memoryService = memoryService;
+        this.graphStateService = graphStateService;
+        this.roleAssigner = roleAssigner;
     }
 
     public PreparedRun prepareStart(Long userId, CreateAgentRunRequest request) {
@@ -125,6 +141,9 @@ public class AgentRunService {
                 userId, conversationId, connection.id(), connection.name(), question, RunStatus.PLANNING,
                 config.agentId(), config.agentVersionId(),
                 writeJson(config.skillVersionRefs()), writeJson(config.allowedToolIds()));
+        graphStateService.initialize(
+                runId, userId, request.workspaceId(), connection.id(),
+                config.agentId(), config.agentVersionId(), writeJson(config.skillVersionRefs()), 0);
         conversationService.appendMessage(conversationId, MessageRole.USER, question, MessageStatus.COMPLETED);
         return new PreparedRun(
                 runId, userId, conversationId, connection.id(), connection.database(), question, config,
@@ -168,7 +187,9 @@ public class AgentRunService {
             String memory = conversationService.memorySummary(run.conversationId());
             writer.event("context.prepared", new AgentStreamEvents.ContextPrepared(
                     run.runId(), recent.size(), memory != null && !memory.isBlank()));
+            emitContextCompacted(run.runId(), writer, recent, run.question());
 
+            graphStateService.enter(run.runId(), GraphNode.ROUTING, writer);
             ManagerRouter.RouteDecision decision = route(run, memory, writer);
             repository.updateRunRoute(run.runId(), decision.route().name(), null, null);
             writer.event("agent.routed", new AgentStreamEvents.AgentRouted(
@@ -180,6 +201,7 @@ public class AgentRunService {
                     repository.updateRunStatus(run.runId(), RunStatus.COMPLETED, CHITCHAT_REPLY, null, null);
                     conversationService.appendMessage(
                             run.conversationId(), MessageRole.ASSISTANT, CHITCHAT_REPLY, MessageStatus.COMPLETED);
+                    graphStateService.enter(run.runId(), GraphNode.COMPLETED, writer);
                     writer.event("run.completed", new AgentStreamEvents.RunCompleted(run.runId(), CHITCHAT_REPLY));
                     updateMemory(run, CHITCHAT_REPLY);
                 }
@@ -187,17 +209,28 @@ public class AgentRunService {
                     String message = decision.reason().isBlank()
                             ? "请补充数据源或业务口径后再提问。" : decision.reason();
                     repository.updateRunStatus(run.runId(), RunStatus.CLARIFYING, null, "AGENT_CLARIFY", message);
+                    graphStateService.enter(run.runId(), GraphNode.WAITING_CLARIFICATION, writer);
                     writer.event("clarify.required", new AgentStreamEvents.ClarifyRequired(run.runId(), message));
                 }
-                case KNOWLEDGE -> answerFromKnowledge(run, writer);
+                case KNOWLEDGE -> {
+                    graphStateService.enter(run.runId(), GraphNode.KNOWLEDGE, writer);
+                    answerFromKnowledge(run, writer);
+                    graphStateService.enter(run.runId(), GraphNode.COMPLETED, writer);
+                }
                 case SIMPLE -> {
+                    graphStateService.enter(run.runId(), GraphNode.PLANNING, writer);
+                    graphStateService.enter(run.runId(), GraphNode.CONTEXT_BUILDING, writer);
+                    graphStateService.enter(run.runId(), GraphNode.RUNNING, writer);
                     AgentPlan plan = new AgentPlan(
                             true, "", List.of(new AgentPlan.Step(truncate(run.question(), 300))));
                     executePlan(run, schema, plan, writer);
                 }
                 case COMPLEX -> {
+                    graphStateService.enter(run.runId(), GraphNode.PLANNING, writer);
                     AgentPlan plan = plan(run, schema, writer);
                     if (plan != null) {
+                        graphStateService.enter(run.runId(), GraphNode.CONTEXT_BUILDING, writer);
+                        graphStateService.enter(run.runId(), GraphNode.RUNNING, writer);
                         executePlan(run, schema, plan, writer);
                     }
                 }
@@ -265,6 +298,12 @@ public class AgentRunService {
     private void executePlan(PreparedRun run, String schema, AgentPlan plan, SseEventWriter writer)
             throws IOException {
         List<AgentStep> steps = createSteps(run.runId(), plan);
+        for (AgentStep step : steps) {
+            String role = roleAssigner.assign(step.objective()).name();
+            repository.updateStepRole(step.id(), role);
+            writer.event("agent.selected", new AgentStreamEvents.AgentSelected(
+                    run.runId(), step.sequence(), step.objective(), role));
+        }
         writer.event("plan.ready", new AgentStreamEvents.PlanReady(
                 run.runId(),
                 steps.stream()
@@ -365,6 +404,7 @@ public class AgentRunService {
         }
         repository.rejectStep(stepId, "用户拒绝执行该 SQL");
         repository.updateRunStatus(runId, RunStatus.CANCELED, null, "AGENT_STEP_REJECTED", "用户拒绝执行该 SQL");
+        graphStateService.enter(runId, GraphNode.CANCELED, null);
     }
 
     @Transactional
@@ -374,6 +414,7 @@ public class AgentRunService {
         if (changed > 0) {
             repository.cancelPendingSteps(runId);
         }
+        graphStateService.enter(runId, GraphNode.CANCELED, null);
     }
 
     public AgentRunResponse detail(Long userId, Long runId) {
@@ -384,7 +425,8 @@ public class AgentRunService {
                 run.question(), run.status(), run.route(), parseRoles(run.roleActivities()),
                 parseSources(run.knowledgeSources()), run.llmCallCount(),
                 run.summary(), run.errorCode(), run.errorMessage(),
-                run.createdAt(), run.updatedAt(), steps.stream().map(AgentRunService::toStepResponse).toList());
+                run.createdAt(), run.updatedAt(), steps.stream().map(AgentRunService::toStepResponse).toList(),
+                repository.findGraphCheckpointJson(run.id()).orElse(null));
     }
 
     public List<AgentRunSummaryResponse> listByConversation(Long userId, Long conversationId) {
@@ -404,6 +446,7 @@ public class AgentRunService {
     private void executeAndContinue(PreparedApproval approval, SseEventWriter writer) throws IOException {
         AgentRun run = approval.run();
         AgentStep step = approval.step();
+        graphStateService.enter(run.id(), GraphNode.SQL_EXECUTION, writer);
         writer.event("agent.started", new AgentStreamEvents.AgentStarted(run.id(), "SQL_AGENT", "step-" + step.sequence()));
         writer.event("step.started", new AgentStreamEvents.StepStarted(step.id(), step.sequence()));
         QueryResultResponse result = executionService.execute(
@@ -483,6 +526,7 @@ public class AgentRunService {
         // 长期 Memory 注入（尊重 Agent 配置的 memory.enabled；按 workspace 过滤权限）
         String memoryContext = memoryContext(run, writer);
 
+        graphStateService.enter(run.runId(), GraphNode.SQL_GENERATION, writer);
         writer.event("agent.started", new AgentStreamEvents.AgentStarted(run.runId(), "SQL_AGENT", "step-" + step.sequence()));
         writer.event("step.started", new AgentStreamEvents.StepStarted(step.id(), step.sequence()));
         String sql;
@@ -509,6 +553,8 @@ public class AgentRunService {
         int nextVersion = step.sqlVersion() + 1;
         repository.setStepSql(step.id(), sql, nextVersion, step.repairCount());
         repository.updateRunStatus(run.runId(), RunStatus.WAITING_APPROVAL, null, null, null);
+        graphStateService.enter(run.runId(), GraphNode.WAITING_SQL_APPROVAL, writer);
+        graphStateService.markWaitingApproval(run.runId(), GraphNode.WAITING_SQL_APPROVAL, writer);
         writer.event("step.sql_ready", new AgentStreamEvents.StepSqlReady(step.id(), sql, nextVersion));
         writer.event("approval.required", new AgentStreamEvents.ApprovalRequired(step.id(), nextVersion));
     }
@@ -607,10 +653,12 @@ public class AgentRunService {
                     run.id(), approval.userId(), run.conversationId(),
                     run.connectionId(), approval.database(), run.question(), approval.config());
             String schema = connectionService.schemaContext(approval.userId(), run.connectionId());
+            graphStateService.enter(run.id(), GraphNode.RUNNING, writer);
             advance(continuation, next.get(), schema, writer);
             return;
         }
 
+        graphStateService.enter(run.id(), GraphNode.REPORT_GENERATION, writer);
         String stepResults = allStepSummaries(steps);
         writer.event("agent.started", new AgentStreamEvents.AgentStarted(run.id(), "INSIGHT", "summary"));
         String summary;
@@ -721,6 +769,7 @@ public class AgentRunService {
         String safe = safeMessage(message);
         repository.failStep(step.id(), code.name(), safe);
         repository.updateRunStatus(run.id(), RunStatus.FAILED, null, code.name(), safe);
+        graphStateService.enter(run.id(), GraphNode.FAILED, writer);
         writer.event("step.failed", new AgentStreamEvents.StepFailed(step.id(), code.name(), safe));
         writer.event("run.failed", new AgentStreamEvents.RunFailed(run.id(), code.name(), safe));
     }
@@ -730,6 +779,7 @@ public class AgentRunService {
         String safe = safeMessage(message);
         repository.failStep(step.id(), code.name(), safe);
         repository.updateRunStatus(run.runId(), RunStatus.FAILED, null, code.name(), safe);
+        graphStateService.enter(run.runId(), GraphNode.FAILED, writer);
         writer.event("step.failed", new AgentStreamEvents.StepFailed(step.id(), code.name(), safe));
         writer.event("run.failed", new AgentStreamEvents.RunFailed(run.runId(), code.name(), safe));
     }
@@ -751,6 +801,7 @@ public class AgentRunService {
             throws IOException {
         String safe = safeMessage(message);
         repository.updateRunStatus(runId, RunStatus.FAILED, null, code, safe);
+        graphStateService.enter(runId, GraphNode.FAILED, writer);
         writer.event("run.failed", new AgentStreamEvents.RunFailed(runId, code, safe));
     }
 
@@ -759,6 +810,34 @@ public class AgentRunService {
             failRunWithEvent(runId, code, message, writer);
         } catch (IOException | RuntimeException ex) {
             log.debug("agent_run_fail_event_skipped runId={}", runId);
+        }
+    }
+
+    /**
+     * 用分层上下文构建器（L1–L4）压缩历史与约束，发出 {@code context.compacted} 事件，
+     * 携带脱敏元数据（输入 token、保留来源、丢弃段、层次、hash），不伪造精确供应商值（P1126）。
+     */
+    private void emitContextCompacted(Long runId, SseEventWriter writer, List<String> recent, String question) {
+        try {
+            List<ContextSegment> segments = new ArrayList<>();
+            segments.add(new ContextSegment(
+                    "q", ContextLayer.L1_RECENT, ContextPriority.HIGH, question, true, false, false));
+            int index = 0;
+            for (String message : recent) {
+                segments.add(new ContextSegment(
+                        "m" + (++index), ContextLayer.L1_RECENT, ContextPriority.MEDIUM, message, false, false, false));
+            }
+            ContextBudget budget = new ContextBudget(200, question.length() / 4 + 60, 0, 8000);
+            LayeredContextResult result = new LayeredContextBuilder(TokenEstimator.defaultEstimator())
+                    .build("SYS", question, segments, budget);
+            var meta = result.meta();
+            writer.event("context.compacted", new AgentStreamEvents.ContextCompacted(
+                    runId, meta.inputTokensEstimate(), meta.retainedSources(), meta.droppedSegments(),
+                    budget.historyBudget(),
+                    meta.layersUsed().stream().map(Enum::name).collect(Collectors.joining(",")),
+                    meta.contextHash()));
+        } catch (IOException | RuntimeException ex) {
+            log.debug("agent_context_compacted_skipped runId={}", runId);
         }
     }
 

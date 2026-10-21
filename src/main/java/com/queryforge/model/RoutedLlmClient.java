@@ -1,11 +1,9 @@
 package com.queryforge.model;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.queryforge.integration.llm.LlmClient;
 import com.queryforge.integration.llm.LlmProperties;
 import com.queryforge.integration.llm.LlmStream;
+import com.queryforge.integration.llm.ModelTransport;
 import com.queryforge.model.ModelEntities.Profile;
 import com.queryforge.model.ModelEntities.Provider;
 import com.queryforge.model.ModelRouter.CallRequirement;
@@ -13,12 +11,6 @@ import com.queryforge.model.ModelRouter.RouteDecision;
 import com.queryforge.shared.error.ApiException;
 import com.queryforge.shared.error.ErrorCode;
 import java.io.IOException;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,14 +19,18 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 
 /**
- * P9 统一模型调用入口（@Primary 替换旧单 Provider 客户端）。
+ * P9/P11 统一模型调用入口（始终 {@code @Primary}，唯一 LlmClient）。
  * 通过 ModelRouter 选择实际 Provider/Model，带能力过滤、授权、熔断、有界重试与故障转移，
  * 每次尝试记录 attempt 并上报健康。复用现有 LlmClient 接口，业务调用方透明升级。
  *
- * 兼容策略：当 ModelCatalog 中没有任何可用 profile 时，回退到 LlmProperties 的默认单 Provider，
+ * <p>P11 修正：底层模型 I/O 委托给 {@link ModelTransport}（默认 {@code HttpModelTransport}；
+ * 可选 {@code SpringAiModelTransport}）。Spring AI 只作底层执行引擎，**不替换、不绕过**
+ * 本类与 P9 治理链路（路由/配额/审计/熔断/故障转移），符合指南 §5.1「不建第二套路由」。
+ *
+ * <p>兼容策略：当 ModelCatalog 中没有任何可用 profile 时，回退到 LlmProperties 的默认单 Provider，
  * 保证 P1-P8 既有行为不被破坏。
  *
- * 安全边界：不绕过 SQL Guard、审批、工具白名单；断流不拼接其他模型。
+ * <p>安全边界：不绕过 SQL Guard、审批、工具白名单；断流不拼接其他模型。
  */
 @Component
 @Primary
@@ -42,27 +38,20 @@ public class RoutedLlmClient implements LlmClient {
 
     private static final Logger log = LoggerFactory.getLogger(RoutedLlmClient.class);
     private static final int MAX_ATTEMPTS = 3;
-    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
-    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(60);
 
     private final ModelRouter router;
     private final ModelCatalogService catalog;
     private final InvocationRecorder recorder;
     private final LlmProperties properties;
-    private final ObjectMapper objectMapper;
-    private final HttpClient httpClient;
+    private final ModelTransport transport;
 
     public RoutedLlmClient(ModelRouter router, ModelCatalogService catalog, InvocationRecorder recorder,
-                           LlmProperties properties, ObjectMapper objectMapper) {
+                           LlmProperties properties, ModelTransport transport) {
         this.router = router;
         this.catalog = catalog;
         this.recorder = recorder;
         this.properties = properties;
-        this.objectMapper = objectMapper;
-        this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(CONNECT_TIMEOUT)
-                .version(HttpClient.Version.HTTP_1_1)
-                .build();
+        this.transport = transport;
     }
 
     /** 路由策略 id / 授权上下文由 ModelRouteContextHolder 提供（业务层设置）。 */
@@ -97,18 +86,11 @@ public class RoutedLlmClient implements LlmClient {
 
     /** 默认单 Provider 回退（复用 LlmProperties），也记录 attempt。 */
     private LlmStream openDefault(String systemPrompt, String userPrompt) {
-        String body = buildBody(properties.model(), systemPrompt, userPrompt);
         String callId = recorder.newCallId();
-        HttpRequest request = HttpRequest.newBuilder(URI.create(properties.baseUrl() + "/chat/completions"))
-                .timeout(properties.requestTimeout())
-                .header("Authorization", "Bearer " + properties.apiKey())
-                .header("Content-Type", "application/json")
-                .header("Accept", "text/event-stream")
-                .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-                .build();
         long start = System.currentTimeMillis();
         try {
-            HttpResponse<Stream<String>> response = httpClient.send(request, HttpResponse.BodyHandlers.ofLines());
+            ModelTransport.Response response = transport.stream(
+                    properties.baseUrl(), properties.apiKey(), properties.model(), systemPrompt, userPrompt);
             if (response.statusCode() != 200) {
                 FailureClass failureClass = FailureClass.fromHttpStatus(response.statusCode());
                 recorder.recordDefaultAttempt(callId, 1, "default", properties.model(), "FAILED",
@@ -117,7 +99,7 @@ public class RoutedLlmClient implements LlmClient {
             }
             recorder.recordDefaultAttempt(callId, 1, "default", properties.model(), "SUCCESS",
                     null, 200, System.currentTimeMillis() - start);
-            return new LlmStream(response.body());
+            return new LlmStream(response.lines());
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
             recorder.recordDefaultAttempt(callId, 1, "default", properties.model(), "INTERRUPTED",
@@ -147,12 +129,13 @@ public class RoutedLlmClient implements LlmClient {
             long start = System.currentTimeMillis();
 
             try {
-                HttpResponse<Stream<String>> response = send(provider, apiKey, profile.modelId(), systemPrompt, userPrompt);
+                ModelTransport.Response response = transport.stream(
+                        provider.baseUrl(), apiKey, profile.modelId(), systemPrompt, userPrompt);
                 if (response.statusCode() == 200) {
                     recorder.recordAttempt(callId, attemptNo, context == null ? null : context.runId(),
                             context == null ? null : context.agentId(), profile, provider, decision.strategy().name(),
                             "SUCCESS", null, 200, System.currentTimeMillis() - start, null, null, null);
-                    return new LlmStream(response.body());
+                    return new LlmStream(response.lines());
                 }
                 FailureClass failureClass = FailureClass.fromHttpStatus(response.statusCode());
                 recorder.recordAttempt(callId, attemptNo, context == null ? null : context.runId(),
@@ -192,30 +175,5 @@ public class RoutedLlmClient implements LlmClient {
             }
         }
         return list.toArray(new Profile[0]);
-    }
-
-    private HttpResponse<Stream<String>> send(Provider provider, String apiKey, String modelId,
-                                              String systemPrompt, String userPrompt)
-            throws IOException, InterruptedException {
-        String body = buildBody(modelId, systemPrompt, userPrompt);
-        HttpRequest request = HttpRequest.newBuilder(URI.create(provider.baseUrl() + "/chat/completions"))
-                .timeout(REQUEST_TIMEOUT)
-                .header("Authorization", "Bearer " + apiKey)
-                .header("Content-Type", "application/json")
-                .header("Accept", "text/event-stream")
-                .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-                .build();
-        return httpClient.send(request, HttpResponse.BodyHandlers.ofLines());
-    }
-
-    private String buildBody(String modelId, String systemPrompt, String userPrompt) {
-        ObjectNode root = objectMapper.createObjectNode();
-        root.put("model", modelId);
-        root.put("stream", true);
-        root.put("temperature", 0);
-        ArrayNode messages = root.putArray("messages");
-        messages.addObject().put("role", "system").put("content", systemPrompt == null ? "" : systemPrompt);
-        messages.addObject().put("role", "user").put("content", userPrompt);
-        return root.toString();
     }
 }

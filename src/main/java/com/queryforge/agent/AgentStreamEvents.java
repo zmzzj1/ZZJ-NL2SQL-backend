@@ -82,4 +82,25 @@ public final class AgentStreamEvents {
     /** 记录本轮注入的长期记忆条数（不含记忆正文）。 */
     public record MemoryRetrieved(Long runId, long count) {
     }
+
+    /** 进入某个统一状态图节点（指南 §8）。 */
+    public record NodeStarted(Long runId, String node, String revision) {
+    }
+
+    /** 离开某个统一状态图节点（指南 §8）。 */
+    public record NodeCompleted(Long runId, String node, String revision) {
+    }
+
+    /** 节点停留于等待 SQL 审批（与 approval.required 互补，表达图层等待语义）。 */
+    public record NodeWaitingApproval(Long runId, String node) {
+    }
+
+    /** 分层上下文压缩完成，附带脱敏元数据（指南 §7.2 / P1126）。 */
+    public record ContextCompacted(Long runId, int inputTokensEstimate, int retainedSources,
+                                   int droppedSegments, int historyBudget, String layersUsed, String contextHash) {
+    }
+
+    /** 本轮为某步骤选定的专业角色（指南 §6 / P1106）。 */
+    public record AgentSelected(Long runId, int sequence, String objective, String role) {
+    }
 }

@@ -20,7 +20,8 @@ public record AgentRunResponse(
         String errorMessage,
         LocalDateTime createdAt,
         LocalDateTime updatedAt,
-        List<AgentStepResponse> steps
+        List<AgentStepResponse> steps,
+        String graphState
 ) {
     public record RoleActivity(String role, String status) {
     }

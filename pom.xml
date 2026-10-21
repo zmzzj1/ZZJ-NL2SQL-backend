@@ -17,16 +17,42 @@
   <name>sql-platform-backend</name>
   <description>QueryForge SQL workbench backend (P0 vertical slices C0-C3)</description>
 
-  <properties>
-    <java.version>21</java.version>
-    <jsqlparser.version>5.3</jsqlparser.version>
-  </properties>
+    <properties>
+        <java.version>21</java.version>
+        <jsqlparser.version>5.3</jsqlparser.version>
+        <spring-ai.version>1.1.8</spring-ai.version>
+    </properties>
 
-  <dependencies>
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-web</artifactId>
-    </dependency>
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-bom</artifactId>
+                <version>${spring-ai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <!-- P11 A1：Spring AI 核心（本地已解析 1.1.8）。仅作为统一模型调用引擎，不引入第二套路由/故障切换。 -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-commons</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-model</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-openai</artifactId>
+        </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-validation</artifactId>

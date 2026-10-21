@@ -1,6 +1,6 @@
 # QueryForge 后端（真实用户与多数据源）
 
-Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性；P10 新增工作流定时调度与安全 CSV 导出。
+Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性；P10 新增工作流定时调度与安全 CSV 导出；P11 新增统一 Agent 执行内核（统一状态图 + 检查点）、专业角色选择与权限门禁、L1–L4 分层上下文压缩，并让 Spring AI 作为可选的底层模型传输层（不绕过 P9 路由治理）。
 
 ## 环境要求
 
@@ -29,6 +29,10 @@ Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL �
 - 长期记忆：个人/空间作用域、类型、来源、置信度、去重、禁用与检索，并按用户及空间权限隔离。
 - 模型治理：供应商与能力档案、用户/空间/Agent 授权、版本化路由策略、熔断、有界重试和故障转移。
 - 平台管理：模型调用记录、用量与失败分类、配额、管理审计；管理接口仅允许服务端持久化的 PLATFORM_ADMIN。
+- 统一状态图：运行节点（ROUTING/PLANNING/CONTEXT_BUILDING/RUNNING/SQL_GENERATION/WAITING_SQL_APPROVAL/SQL_EXECUTION/REPORT_GENERATION/COMPLETED/FAILED/CANCELED 等）带合法性校验，检查点持久化到 `agent_graph_checkpoints`，SSE `node.*` 轨迹与详情恢复同一套状态。
+- 专业角色：Manager/Planner/Data Analyst/Code Analyst/Tool Assistant/Report Assistant 具备角色定义、输入契约与工具白名单，运行时拒绝越权调用；RoleAssigner 的选择结果持久化到步骤并由前端展示。
+- L1–L4 分层上下文：渐进装入、脱敏压缩元数据、预算压力下保留审批/授权/关键事实，Token 估算明确标注为近似值。
+- Spring AI 可选传输层：`app.llm.use-spring-ai=true` 时以 Spring AI ChatClient 作为底层模型传输（`SpringAiModelTransport`），但统一入口仍是 P9 `RoutedLlmClient`（路由/配额/审计/熔断/故障转移不变），绝不替换或绕过。
 
 ## 数据库初始化
 
@@ -48,6 +52,7 @@ mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/re
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/09-p8-workspace-rag-memory.sql
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/10-p9-model-governance.sql
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/11-p10-workflow-schedule.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/12-p11-agent-graph.sql
 ```
 
 创建账号（密码由本地管理员设置，不提交仓库）：
@@ -97,10 +102,16 @@ APP_ENCRYPTION_KEY=<base64-32-bytes>
 | `ANALYSIS_SANDBOX_IMAGE` / `ANALYSIS_SANDBOX_COMMAND` | 沙箱镜像/入口命令 |
 | `MCP_ECHO_SCRIPT` | 本地 MCP 测试服务脚本路径（默认 `tools/mcp-echo-server.mjs`） |
 
+Spring 属性（通过 `--app.*=value` 或外部配置传入）：
+
+| 属性 | 说明 |
+| --- | --- |
+| `app.llm.use-spring-ai` | 是否用 Spring AI ChatClient 作为底层模型传输层；默认 `false`（用内置 HTTP 客户端）。无论取值，统一入口都是 `RoutedLlmClient`，路由/配额/审计/熔断/故障转移语义不变，Spring AI 只替换最底层的 I/O 实现 |
+
 ## 启动与测试
 
 ```powershell
-$env:JAVA_HOME = 'D:\dev\tools\jdk-21.0.12.1+1'
+# 确保 JAVA_HOME 指向本机安装的 JDK 21
 mvn verify
 mvn spring-boot:run
 ```
@@ -169,6 +180,8 @@ mvn spring-boot:run
 - 路由先执行能力与授权过滤，再应用策略；流式响应中断后不拼接其他模型，SQL Guard 与审批边界保持不变。
 - 定时触发前重新校验工作流、连接、工作空间和 Agent 版本权限；调度器不自动批准或直接执行待确认 SQL。
 - CSV 导出不信任历史结果，按当前用户权限重新执行只读查询，并限制行数、单元格和文件大小以及转义公式前缀。
+- 统一状态图终态（COMPLETED/FAILED/CANCELED）不接受迟到回调覆写；审批以 `sqlVersion` + 原子领取保证重复批准/重放/双标签页不重复执行 SQL。
+- Spring AI 只作底层传输层，不替换或绕过统一模型入口；P9 的路由、授权、配额、审计、熔断与故障转移在任意传输层下都保留。
 
 ## 本地模型测试桩
 
@@ -182,4 +195,4 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn s
 
 ## 测试
 
-- `mvn verify`：214 个自动化用例，包含 Controller 切片、Service 单元测试，以及 P6–P10（分析器/报告/工具/工作流/Studio/Skill/Workspace/RAG/Memory/模型治理/定时调度/CSV 导出/权限）测试。
+- `mvn verify`：261 个自动化用例，包含 Controller 切片、Service 单元测试，以及 P6–P11（分析器/报告/工具/工作流/Studio/Skill/Workspace/RAG/Memory/模型治理/定时调度/CSV 导出/统一状态图/角色门禁/分层上下文/Spring AI 传输层/路由治理）测试。

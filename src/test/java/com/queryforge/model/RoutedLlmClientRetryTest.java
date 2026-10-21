@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.queryforge.integration.llm.HttpModelTransport;
 import com.queryforge.integration.llm.LlmProperties;
 import com.queryforge.model.ModelEntities.Profile;
 import com.queryforge.model.ModelEntities.Provider;
@@ -61,7 +62,7 @@ class RoutedLlmClientRetryTest {
         recorder = new InvocationRecorder(repository, health);
         properties = new LlmProperties("http://127.0.0.1:0/v1", "key", "default-model",
                 Duration.ofSeconds(5), Duration.ofSeconds(10));
-        client = new RoutedLlmClient(router, catalog, recorder, properties, new ObjectMapper());
+        client = new RoutedLlmClient(router, catalog, recorder, properties, new HttpModelTransport(new ObjectMapper()));
         requestCount = new AtomicInteger(0);
     }
 
