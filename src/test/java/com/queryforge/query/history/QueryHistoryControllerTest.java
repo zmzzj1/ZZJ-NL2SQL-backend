@@ -4,6 +4,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -41,6 +42,9 @@ class QueryHistoryControllerTest {
 
     @MockitoBean
     private QueryHistoryService service;
+
+    @MockitoBean
+    private CsvExportService exportService;
 
     @BeforeEach
     void authenticate() {
@@ -86,6 +90,30 @@ class QueryHistoryControllerTest {
                 .when(service).detail(1L, 3L);
 
         mockMvc.perform(get("/api/v1/query-history/3"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("HISTORY_NOT_FOUND"));
+    }
+
+    @Test
+    @DisplayName("导出成功记录返回 text/csv 附件")
+    void export_shouldReturnCsvAttachment() throws Exception {
+        byte[] body = "id,name\r\n1,'=1+1\r\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        when(exportService.export(1L, 3L))
+                .thenReturn(new CsvExportService.CsvExport("query-3.csv", body));
+
+        mockMvc.perform(get("/api/v1/query-history/3/export"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Content-Disposition", org.hamcrest.Matchers.containsString("query-3.csv")));
+    }
+
+    @Test
+    @DisplayName("导出他人记录返回 404")
+    void export_shouldRejectForeignRecord() throws Exception {
+        doThrow(new ApiException(
+                ErrorCode.HISTORY_NOT_FOUND, HttpStatus.NOT_FOUND, "查询记录不存在或无权访问"))
+                .when(exportService).export(1L, 3L);
+
+        mockMvc.perform(get("/api/v1/query-history/3/export"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value("HISTORY_NOT_FOUND"));
     }

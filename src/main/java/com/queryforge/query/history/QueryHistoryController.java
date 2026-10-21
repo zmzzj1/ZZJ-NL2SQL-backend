@@ -4,7 +4,11 @@ import com.queryforge.shared.pagination.PageResponse;
 import com.queryforge.query.history.QueryHistoryResponse;
 import com.queryforge.identity.AppUserPrincipal;
 import com.queryforge.query.history.QueryHistoryService;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -22,9 +26,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class QueryHistoryController {
 
     private final QueryHistoryService service;
+    private final CsvExportService exportService;
 
-    public QueryHistoryController(QueryHistoryService service) {
+    public QueryHistoryController(QueryHistoryService service, CsvExportService exportService) {
         this.service = service;
+        this.exportService = exportService;
     }
 
     @GetMapping
@@ -49,5 +55,18 @@ public class QueryHistoryController {
             @AuthenticationPrincipal AppUserPrincipal principal,
             @PathVariable Long id) {
         service.delete(principal.id(), id);
+    }
+
+    /** 导出成功执行结果的 CSV：按“重新审批的再次查询”重新鉴权 + 重新执行，不缓存结果快照。 */
+    @GetMapping("/{id}/export")
+    public ResponseEntity<byte[]> export(
+            @AuthenticationPrincipal AppUserPrincipal principal,
+            @PathVariable Long id) {
+        CsvExportService.CsvExport export = exportService.export(principal.id(), id);
+        return ResponseEntity.ok()
+                .contentType(new MediaType("text", "csv", java.nio.charset.StandardCharsets.UTF_8))
+                .header(HttpHeaders.CONTENT_DISPOSITION,
+                        ContentDisposition.attachment().filename(export.filename()).build().toString())
+                .body(export.bytes());
     }
 }

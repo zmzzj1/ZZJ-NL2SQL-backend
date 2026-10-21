@@ -1,8 +1,6 @@
 # QueryForge 后端（真实用户与多数据源）
 
-Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性。
-
-P10 定时调度功能持续开发中。
+Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性；P10 新增工作流定时调度与安全 CSV 导出。
 
 ## 环境要求
 
@@ -21,6 +19,8 @@ P10 定时调度功能持续开发中。
 - 隔离 Python 数据分析（Docker 沙箱，不可用时拒绝回退宿主机）、内置确定性分析器。
 - 结构化图表（table/bar/line/pie）与净化 HTML 报告（CSP + 沙箱预览）。
 - 可视化工作流 DAG（校验、版本化、串行执行、SQL 审批暂停/恢复、SSE）。
+- 工作流定时调度：Cron/时区校验、未来时间预览、启停、幂等触发、数据库租约、misfire/overlap 策略；含 SQL 的运行仍停在审批边界。
+- 查询历史 CSV 导出：重新校验资源权限与 SQL Guard、重新执行受限查询，并防止表格公式注入。
 - Agent Studio：草稿 CRUD、工具白名单、RAG/Memory 策略、Skill 绑定、发布不可变版本、回滚与审计。
 - Skill Registry：CRUD、不可变版本发布、模板白名单变量校验、运行时按相关性选择并注入。
 - 运行配置统一解析（`config/RuntimeConfigResolver`），配置真正影响 Manager/Agent Run/Tool Registry；Run 固定版本快照。
@@ -47,6 +47,7 @@ mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/re
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/08-p7-agent-studio-skill.sql
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/09-p8-workspace-rag-memory.sql
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/10-p9-model-governance.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/11-p10-workflow-schedule.sql
 ```
 
 创建账号（密码由本地管理员设置，不提交仓库）：
@@ -88,6 +89,9 @@ APP_ENCRYPTION_KEY=<base64-32-bytes>
 | `SQL_MAX_ROWS` / `SQL_QUERY_TIMEOUT_SECONDS` | 行数/超时限制 |
 | `AGENT_MAX_STEPS` / `AGENT_MAX_REPAIRS` | Agent 最大步骤数/单步最大修复次数 |
 | `AGENT_MAX_PLAN_CHARS` / `AGENT_MAX_LLM_CALLS` | 计划长度/单次运行 LLM 调用上限 |
+| `SCHEDULE_POLL_INTERVAL_MS` / `SCHEDULE_LEASE_SECONDS` | 调度轮询间隔/执行租约秒数 |
+| `SCHEDULE_MAX_CLAIM_BATCH` / `SCHEDULE_EXECUTION_THREADS` | 单轮最大领取数/执行并发数 |
+| `SCHEDULE_CATCH_UP_WINDOW_MINUTES` / `SCHEDULE_MIN_INTERVAL_MINUTES` | 补偿窗口/允许的最短计划周期 |
 | `ANALYSIS_MAX_INPUT_ROWS/BYTES/CODE_CHARS` | 分析输入行数/字节/代码字符上限 |
 | `ANALYSIS_TIMEOUT_SECONDS` / `ANALYSIS_MEMORY_BYTES` / `ANALYSIS_CPUS` | 沙箱超时/内存/CPU 限额 |
 | `ANALYSIS_SANDBOX_IMAGE` / `ANALYSIS_SANDBOX_COMMAND` | 沙箱镜像/入口命令 |
@@ -119,6 +123,7 @@ mvn spring-boot:run
 | GET/POST | `/api/v1/conversations` | 会话列表/新建 |
 | GET/DELETE | `/api/v1/conversations/{id}` | 会话详情/删除 |
 | GET/DELETE | `/api/v1/query-history[/{id}]` | 查询历史列表、详情与删除 |
+| GET | `/api/v1/query-history/{id}/export` | 重新鉴权、Guard 校验并执行后导出 CSV |
 | POST | `/api/v1/sql/generate/stream` | SSE，`connectionId` 决定 Schema |
 | POST | `/api/v1/sql/execute` | 只读执行，`connectionId + sql` |
 | POST | `/api/v1/agent/runs/stream` | 创建并流式运行 Agent |
@@ -133,6 +138,7 @@ mvn spring-boot:run
 | GET/POST | `/api/v1/mcp/servers`、`.../{name}/test`、`.../{tool}/call` | MCP 预配置服务发现与只读调用 |
 | POST/GET/PUT/DELETE | `/api/v1/workflows`、`/api/v1/workflows/{id}` | 工作流 DAG 定义与版本化 |
 | POST/GET | `/api/v1/workflows/{id}/runs/stream`、`.../approve/stream` | 工作流运行与审批续跑 |
+| GET/POST/PATCH/DELETE | `/api/v1/schedules/**` | 定时计划、Cron 预览、启停、手动触发与运行历史 |
 | GET/POST/PATCH/DELETE | `/api/v1/studio/agents/**` | Agent Studio：草稿、发布、版本、回滚、测试运行 |
 | GET/POST/PATCH/DELETE | `/api/v1/skills/**` | Skill Registry：CRUD、发布、版本 |
 | GET/POST/PATCH/DELETE | `/api/v1/workspaces/**` | 工作空间、成员角色与资源授权 |
@@ -161,6 +167,8 @@ mvn spring-boot:run
 - 平台管理员身份只由数据库用户角色决定；Workspace OWNER 不自动获得平台管理权限。
 - 模型供应商 Key 加密保存且永不回传；供应商 URL 拒绝回环、私网、保留网段及非 HTTP(S) 协议。
 - 路由先执行能力与授权过滤，再应用策略；流式响应中断后不拼接其他模型，SQL Guard 与审批边界保持不变。
+- 定时触发前重新校验工作流、连接、工作空间和 Agent 版本权限；调度器不自动批准或直接执行待确认 SQL。
+- CSV 导出不信任历史结果，按当前用户权限重新执行只读查询，并限制行数、单元格和文件大小以及转义公式前缀。
 
 ## 本地模型测试桩
 
@@ -174,4 +182,4 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn s
 
 ## 测试
 
-- `mvn test`：174 个自动化用例，包含 Controller 切片、Service 单元测试，以及 P6–P9（分析器/报告/工具/工作流/Studio/Skill/Workspace/RAG/Memory/模型路由/熔断/重试/权限）单测。
+- `mvn verify`：214 个自动化用例，包含 Controller 切片、Service 单元测试，以及 P6–P10（分析器/报告/工具/工作流/Studio/Skill/Workspace/RAG/Memory/模型治理/定时调度/CSV 导出/权限）测试。
