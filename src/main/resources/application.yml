@@ -58,6 +58,13 @@ app:
     max-repairs: ${AGENT_MAX_REPAIRS:2}
     max-plan-chars: ${AGENT_MAX_PLAN_CHARS:6000}
     max-llm-calls: ${AGENT_MAX_LLM_CALLS:12}
+  schedule:
+    poll-interval-ms: ${SCHEDULE_POLL_INTERVAL_MS:5000}
+    lease-seconds: ${SCHEDULE_LEASE_SECONDS:60}
+    max-claim-batch: ${SCHEDULE_MAX_CLAIM_BATCH:10}
+    catch-up-window-minutes: ${SCHEDULE_CATCH_UP_WINDOW_MINUTES:15}
+    min-interval-minutes: ${SCHEDULE_MIN_INTERVAL_MINUTES:1}
+    execution-threads: ${SCHEDULE_EXECUTION_THREADS:4}
   analysis:
     max-input-rows: ${ANALYSIS_MAX_INPUT_ROWS:200}
     max-input-bytes: ${ANALYSIS_MAX_INPUT_BYTES:262144}

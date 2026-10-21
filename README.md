@@ -2,6 +2,8 @@
 
 Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性。
 
+P10 定时调度功能持续开发中。
+
 ## 环境要求
 
 - JDK 21（验证使用 Temurin 21.0.12.1）
