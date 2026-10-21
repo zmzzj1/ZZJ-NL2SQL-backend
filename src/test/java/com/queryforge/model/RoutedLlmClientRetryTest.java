@@ -15,6 +15,7 @@ import com.queryforge.model.ModelEntities.Profile;
 import com.queryforge.model.ModelEntities.Provider;
 import com.queryforge.model.ModelRouter.CallRequirement;
 import com.queryforge.model.ModelRouter.RouteDecision;
+import com.queryforge.testutil.RedissonFixtures;
 import com.sun.net.httpserver.HttpServer;
 import java.net.InetSocketAddress;
 import java.time.Duration;
@@ -62,7 +63,9 @@ class RoutedLlmClientRetryTest {
         recorder = new InvocationRecorder(repository, health);
         properties = new LlmProperties("http://127.0.0.1:0/v1", "key", "default-model",
                 Duration.ofSeconds(5), Duration.ofSeconds(10));
-        client = new RoutedLlmClient(router, catalog, recorder, properties, new HttpModelTransport(new ObjectMapper()));
+        client = new RoutedLlmClient(router, catalog, recorder, properties,
+                new HttpModelTransport(new ObjectMapper()),
+                new ModelSessionAffinity(RedissonFixtures.noopRedisson()));
         requestCount = new AtomicInteger(0);
     }
 
@@ -100,7 +103,7 @@ class RoutedLlmClientRetryTest {
         Provider prov = new Provider(10L, "p", "OPENAI_COMPAT", baseUrl, "cipher", true, 1L, null, null);
         Profile primary = profile(1L);
         Profile fallback = profile(2L);
-        when(router.route(null, 1L, null, CallRequirement.chat(true, false, false)))
+        when(router.routeWithAffinity(null, 1L, null, CallRequirement.chat(true, false, false), null))
                 .thenReturn(new RouteDecision(primary, prov, RouteStrategy.ROUND_ROBIN, "", java.util.List.of(fallback)));
         when(catalog.requireProvider(10L)).thenReturn(prov);
         when(catalog.decryptKey(prov)).thenReturn("key");
@@ -119,7 +122,7 @@ class RoutedLlmClientRetryTest {
         startServer(n -> 401);
         Provider prov = new Provider(10L, "p", "OPENAI_COMPAT", baseUrl, "cipher", true, 1L, null, null);
         Profile p = profile(1L);
-        when(router.route(null, 1L, null, CallRequirement.chat(true, false, false)))
+        when(router.routeWithAffinity(null, 1L, null, CallRequirement.chat(true, false, false), null))
                 .thenReturn(new RouteDecision(p, prov, RouteStrategy.ROUND_ROBIN, ""));
         when(catalog.requireProvider(10L)).thenReturn(prov);
         when(catalog.decryptKey(prov)).thenReturn("key");

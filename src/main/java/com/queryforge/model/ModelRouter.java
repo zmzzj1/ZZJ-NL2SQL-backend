@@ -54,6 +54,16 @@ public class ModelRouter {
      * 无已发布策略时，回退到"任一可用的受信任 Chat 模型"（默认 Provider 兼容）。
      */
     public RouteDecision route(Long policyId, Long userId, Long workspaceId, CallRequirement requirement) {
+        return routeWithAffinity(policyId, userId, workspaceId, requirement, null);
+    }
+
+    /**
+     * P12 S4：带会话亲和性的路由。{@code affinityProfileId} 非空且仍满足完整过滤链
+     * （类型/启用/授权/Provider/熔断）时优先复用该模型（策略记为 SESSION_AFFINITY）；
+     * 否则按策略正常选择。亲和性不降低任何准入检查。
+     */
+    public RouteDecision routeWithAffinity(Long policyId, Long userId, Long workspaceId,
+                                           CallRequirement requirement, Long affinityProfileId) {
         RoutePolicyVersion policy = policyId == null ? null : repository.findPublishedPolicy(policyId).orElse(null);
 
         List<Profile> candidates;
@@ -82,6 +92,18 @@ public class ModelRouter {
 
         RouteStrategy strategy = policy == null ? RouteStrategy.ROUND_ROBIN : RouteStrategy.from(policy.strategy());
         Profile selected = select(strategy, eligible, policy);
+        if (affinityProfileId != null) {
+            Profile bound = eligible.stream()
+                    .filter(profile -> profile.id().equals(affinityProfileId))
+                    .findFirst()
+                    .orElse(null);
+            if (bound != null) {
+                // 绑定模型仍合格：复用（fallback 链按常规构建，首选替换为绑定模型）
+                selected = bound;
+                strategy = RouteStrategy.SESSION_AFFINITY;
+                appendReason(filterReason, "session-affinity:" + bound.id());
+            }
+        }
         Provider provider = catalog.requireProvider(selected.providerId());
         // fallback 链：候选/回退链中除首选外仍合格且已授权的模型。
         List<Profile> fallback = buildFallback(policy, eligible, selected, userId, workspaceId, requirement);
@@ -175,6 +197,8 @@ public class ModelRouter {
             case LATENCY_FIRST -> latencyFirst(eligible);
             case SUCCESS_RATE_FIRST -> successRateFirst(eligible);
             case SMART_WEIGHTED -> smartWeighted(eligible, policy);
+            // SESSION_AFFINITY 由 routeWithAffinity 在 select 之前直接命中；此处仅作编译完备分支。
+            case SESSION_AFFINITY -> roundRobin(eligible);
         };
     }
 

@@ -9,22 +9,26 @@ import com.queryforge.shared.error.ApiException;
 import com.queryforge.shared.error.ErrorCode;
 import com.queryforge.datasource.repository.ConnectionRepository;
 import com.queryforge.knowledge.KnowledgeRepository;
+import com.queryforge.rag.HybridKnowledgeRetriever;
 import com.queryforge.workspace.WorkspaceAccessPolicy;
 import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 /**
  * 业务术语与审核 SQL 示例的维护与检索。
- * 当前使用明确标注的关键词相关性检索（向量语义检索需要 Embedding 环境，另行评估）。
+ * 关键词检索为稳定基线；P12 S3 起在保存/更新/删除时同步维护向量索引（MySQL + pgvector）。
  */
 @Service
 public class KnowledgeService {
 
+    private static final Logger log = LoggerFactory.getLogger(KnowledgeService.class);
     private static final int MAX_HITS = 5;
     private static final int SNIPPET_CHARS = 200;
     private static final String RETRIEVAL_MODE = "KEYWORD_DEGRADED";
@@ -32,19 +36,23 @@ public class KnowledgeService {
     private final KnowledgeRepository repository;
     private final ConnectionRepository connectionRepository;
     private final WorkspaceAccessPolicy workspaceAccessPolicy;
+    private final HybridKnowledgeRetriever hybridRetriever;
 
     public KnowledgeService(KnowledgeRepository repository, ConnectionRepository connectionRepository,
-                            WorkspaceAccessPolicy workspaceAccessPolicy) {
+                            WorkspaceAccessPolicy workspaceAccessPolicy, HybridKnowledgeRetriever hybridRetriever) {
         this.repository = repository;
         this.connectionRepository = connectionRepository;
         this.workspaceAccessPolicy = workspaceAccessPolicy;
+        this.hybridRetriever = hybridRetriever;
     }
 
     public KnowledgeEntryResponse create(Long userId, KnowledgeEntryRequest request) {
         validateScope(userId, request.connectionId());
         Long id = repository.insert(
                 userId, request.connectionId(), request.sourceType(), request.title().trim(), request.content().trim());
-        return toResponse(repository.findOwned(id, userId).orElseThrow(KnowledgeService::notFound));
+        KnowledgeEntry saved = repository.findOwned(id, userId).orElseThrow(KnowledgeService::notFound);
+        indexSafely(saved);
+        return toResponse(saved);
     }
 
     public KnowledgeEntryResponse update(Long userId, Long id, KnowledgeEntryRequest request) {
@@ -55,7 +63,9 @@ public class KnowledgeService {
                 request.content().trim(), newVersion) == 0) {
             throw notFound();
         }
-        return toResponse(requireOwned(id, userId));
+        KnowledgeEntry updated = requireOwned(id, userId);
+        indexSafely(updated);
+        return toResponse(updated);
     }
 
     public List<KnowledgeEntryResponse> list(Long userId, KnowledgeType sourceType) {
@@ -65,6 +75,22 @@ public class KnowledgeService {
     public void delete(Long userId, Long id) {
         if (repository.delete(id, userId) == 0) {
             throw notFound();
+        }
+        // 向量失效：MySQL 旧代 SUPERSEDED + pgvector 软删除（fail-soft）
+        try {
+            hybridRetriever.deindex(id);
+        } catch (RuntimeException ex) {
+            log.warn("knowledge_deindex_failed id={}", id, ex);
+        }
+    }
+
+    /** 知识保存/更新后同步向量索引（fail-soft：Embedding/PG 不可用不影响主保存）。 */
+    private void indexSafely(KnowledgeEntry entry) {
+        try {
+            hybridRetriever.indexKnowledge(entry.id(), entry.userId(), null, entry.connectionId(),
+                    entry.sourceType(), entry.title(), entry.content());
+        } catch (RuntimeException ex) {
+            log.warn("knowledge_index_failed id={}", entry.id(), ex);
         }
     }
 

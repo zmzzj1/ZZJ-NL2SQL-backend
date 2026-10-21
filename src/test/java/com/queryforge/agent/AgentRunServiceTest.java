@@ -112,6 +112,12 @@ class AgentRunServiceTest {
     @Mock
     private RoleAssigner roleAssigner;
 
+    @Mock
+    private com.queryforge.schedule.AgentPlanStore planStore;
+
+    @Mock
+    private ApprovalSessionStore approvalSessionStore;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private AgentRunService service;
 
@@ -121,7 +127,7 @@ class AgentRunServiceTest {
                 repository, conversationService, connectionService, planner, sqlAssistant,
                 executionService, guard, new AgentProperties(3, 2, 6000, 12), objectMapper,
                 managerRouter, knowledgeService, configResolver, skillService, memoryService,
-                graphStateService, roleAssigner);
+                graphStateService, roleAssigner, planStore, approvalSessionStore);
         org.mockito.Mockito.lenient().when(roleAssigner.assign(anyString())).thenReturn(AgentRole.DATA_ANALYST);
     }
 
@@ -164,6 +170,8 @@ class AgentRunServiceTest {
         assertThat(indexOf(output, "event: plan.ready")).isLessThan(indexOf(output, "event: approval.required"));
         verify(repository).setStepSql(STEP_ID, SQL, 1, 0);
         verify(repository).updateRunStatus(RUN_ID, RunStatus.WAITING_APPROVAL, null, null, null);
+        // P12 S4：进入待审批时登记短期授权上下文。
+        verify(approvalSessionStore).register(RUN_ID, STEP_ID, 1, "sql_demo_a");
     }
 
     @Test
@@ -295,6 +303,60 @@ class AgentRunServiceTest {
     }
 
     @Test
+    @DisplayName("P12 S4：审批令牌已过期/已消费时拒绝继续（先于 DB 领取）")
+    void prepareApproval_shouldRejectWhenTokenMissing() {
+        when(repository.findRunOwned(RUN_ID, USER_ID)).thenReturn(Optional.of(run(RunStatus.WAITING_APPROVAL)));
+        when(repository.findStep(RUN_ID, STEP_ID))
+                .thenReturn(Optional.of(step(StepStatus.WAITING_APPROVAL, SQL, 1, 0)));
+        when(approvalSessionStore.claim(RUN_ID, STEP_ID))
+                .thenReturn(ApprovalSessionStore.Claim.MISSING);
+
+        assertThatThrownBy(() -> service.prepareApproval(
+                USER_ID, RUN_ID, STEP_ID, new ApproveAgentStepRequest(1, true, null)))
+                .isInstanceOfSatisfying(ApiException.class, ex -> {
+                    assertThat(ex.getErrorCode()).isEqualTo(ErrorCode.AGENT_STATE_CONFLICT);
+                    assertThat(ex.getStatus().value()).isEqualTo(409);
+                });
+        verify(repository, never()).claimStep(any(), any(), any(Integer.class));
+    }
+
+    @Test
+    @DisplayName("P12 S4：令牌有效时先消费令牌再原子领取步骤")
+    void prepareApproval_shouldClaimTokenBeforeDbClaim() {
+        when(repository.findRunOwned(RUN_ID, USER_ID)).thenReturn(Optional.of(run(RunStatus.WAITING_APPROVAL)));
+        when(repository.findStep(RUN_ID, STEP_ID))
+                .thenReturn(Optional.of(step(StepStatus.WAITING_APPROVAL, SQL, 1, 0)));
+        when(approvalSessionStore.claim(RUN_ID, STEP_ID))
+                .thenReturn(ApprovalSessionStore.Claim.CLAIMED);
+        when(connectionService.summary(USER_ID, CONNECTION_ID))
+                .thenReturn(new ConnectionService.ConnectionSummary(CONNECTION_ID, "A 商店库", "sql_demo_a"));
+        when(repository.claimStep(RUN_ID, STEP_ID, 1)).thenReturn(1);
+
+        service.prepareApproval(USER_ID, RUN_ID, STEP_ID, new ApproveAgentStepRequest(1, true, null));
+
+        verify(approvalSessionStore).claim(RUN_ID, STEP_ID);
+        verify(repository).claimStep(RUN_ID, STEP_ID, 1);
+        verify(repository).updateRunStatus(RUN_ID, RunStatus.RUNNING, null, null, null);
+    }
+
+    @Test
+    @DisplayName("P12 S4：Redis 不可用时由 DB 领取独立裁决（不伪造令牌状态）")
+    void prepareApproval_shouldFallBackToDbClaimWhenRedisUnavailable() {
+        when(repository.findRunOwned(RUN_ID, USER_ID)).thenReturn(Optional.of(run(RunStatus.WAITING_APPROVAL)));
+        when(repository.findStep(RUN_ID, STEP_ID))
+                .thenReturn(Optional.of(step(StepStatus.WAITING_APPROVAL, SQL, 1, 0)));
+        when(approvalSessionStore.claim(RUN_ID, STEP_ID))
+                .thenReturn(ApprovalSessionStore.Claim.UNAVAILABLE);
+        when(connectionService.summary(USER_ID, CONNECTION_ID))
+                .thenReturn(new ConnectionService.ConnectionSummary(CONNECTION_ID, "A 商店库", "sql_demo_a"));
+        when(repository.claimStep(RUN_ID, STEP_ID, 1)).thenReturn(1);
+
+        service.prepareApproval(USER_ID, RUN_ID, STEP_ID, new ApproveAgentStepRequest(1, true, null));
+
+        verify(repository).claimStep(RUN_ID, STEP_ID, 1);
+    }
+
+    @Test
     @DisplayName("拒绝待确认 SQL 会取消步骤与运行")
     void reject_shouldCancelRun() {
         when(repository.findRunOwned(RUN_ID, USER_ID)).thenReturn(Optional.of(run(RunStatus.WAITING_APPROVAL)));
@@ -306,6 +368,9 @@ class AgentRunServiceTest {
         verify(repository).rejectStep(STEP_ID, "用户拒绝执行该 SQL");
         verify(repository).updateRunStatus(
                 RUN_ID, RunStatus.CANCELED, null, "AGENT_STEP_REJECTED", "用户拒绝执行该 SQL");
+        // P12 S4：拒绝后解除短期授权上下文与计划快照。
+        verify(approvalSessionStore).remove(RUN_ID, STEP_ID);
+        verify(planStore).remove(String.valueOf(RUN_ID));
     }
 
     @Test

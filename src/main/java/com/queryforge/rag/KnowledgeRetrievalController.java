@@ -39,7 +39,8 @@ public class KnowledgeRetrievalController {
             @AuthenticationPrincipal AppUserPrincipal principal,
             @Valid @RequestBody RetrieveRequest request) {
         return retriever.retrieve(
-                java.util.List.of(), principal.id(), request.workspaceId(), request.query(), request.mode());
+                java.util.List.of(), principal.id(), request.workspaceId(), request.connectionId(),
+                request.query(), request.mode());
     }
 
     /** 索引状态查询。 */
@@ -55,13 +56,14 @@ public class KnowledgeRetrievalController {
             @PathVariable Long id) {
         KnowledgeEntry entry = knowledgeService.requireOwnedEntry(id, principal.id());
         int generation = retriever.indexKnowledge(entry.id(), entry.userId(), null,
-                entry.title(), entry.content());
+                entry.connectionId(), entry.sourceType(), entry.title(), entry.content());
         return new IndexResult(id, generation);
     }
 
     public record RetrieveRequest(
             @NotBlank String query,
             Long workspaceId,
+            Long connectionId,
             @NotNull Mode mode
     ) {
     }

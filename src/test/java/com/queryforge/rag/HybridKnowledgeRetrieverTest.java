@@ -29,11 +29,14 @@ class HybridKnowledgeRetrieverTest {
     @Mock
     private KnowledgeIndexRepository indexRepository;
 
+    @Mock
+    private PgVectorStore pgVectorStore;
+
     private HybridKnowledgeRetriever retriever;
 
     @BeforeEach
     void setUp() {
-        retriever = new HybridKnowledgeRetriever(embeddingClient, indexRepository);
+        retriever = new HybridKnowledgeRetriever(embeddingClient, indexRepository, pgVectorStore);
     }
 
     @Test
@@ -52,7 +55,7 @@ class HybridKnowledgeRetrieverTest {
         List<KnowledgeSearchResponse.Hit> keywordHits = List.of(
                 new KnowledgeSearchResponse.Hit(1L, KnowledgeType.GLOSSARY, "有效订单", 1, 0.9, "已支付订单"));
 
-        KnowledgeSearchResponse result = retriever.retrieve(keywordHits, USER_ID, null, "有效订单", Mode.KEYWORD);
+        KnowledgeSearchResponse result = retriever.retrieve(keywordHits, USER_ID, null, null, "有效订单", Mode.KEYWORD);
 
         assertThat(result.retrievalMode()).isEqualTo("KEYWORD");
         assertThat(result.items()).hasSize(1);
@@ -66,7 +69,7 @@ class HybridKnowledgeRetrieverTest {
                 chunk(1L, List.of(1.0, 0.0), "有效订单定义"),
                 chunk(2L, List.of(0.0, 1.0), "库存定义")));
 
-        KnowledgeSearchResponse result = retriever.retrieve(List.of(), USER_ID, null, "有效订单", Mode.VECTOR);
+        KnowledgeSearchResponse result = retriever.retrieve(List.of(), USER_ID, null, null, "有效订单", Mode.VECTOR);
 
         assertThat(result.retrievalMode()).isEqualTo("VECTOR");
         assertThat(result.items()).isNotEmpty();
@@ -83,7 +86,7 @@ class HybridKnowledgeRetrieverTest {
                 chunk(1L, List.of(1.0, 0.0), "有效订单定义"),
                 chunk(2L, List.of(0.0, 1.0), "库存定义")));
 
-        KnowledgeSearchResponse result = retriever.retrieve(keywordHits, USER_ID, null, "有效订单", Mode.HYBRID);
+        KnowledgeSearchResponse result = retriever.retrieve(keywordHits, USER_ID, null, null, "有效订单", Mode.HYBRID);
 
         assertThat(result.retrievalMode()).isEqualTo("HYBRID");
         assertThat(result.items()).extracting(KnowledgeSearchResponse.Hit::id).contains(1L);

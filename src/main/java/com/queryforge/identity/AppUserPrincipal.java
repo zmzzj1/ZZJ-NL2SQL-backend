@@ -46,6 +46,11 @@ public final class AppUserPrincipal implements UserDetails {
         return "ADMIN".equalsIgnoreCase(role);
     }
 
+    /** 服务端持久化的角色（Sa-Token 会话快照需要原样带回，不做前端可见的二次推导）。 */
+    public String role() {
+        return role;
+    }
+
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
         return List.of(new SimpleGrantedAuthority(isPlatformAdmin() ? "ROLE_ADMIN" : "ROLE_USER"));

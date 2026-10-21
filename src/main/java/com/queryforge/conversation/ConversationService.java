@@ -44,10 +44,13 @@ public class ConversationService {
 
     private final ConversationRepository repository;
     private final ConnectionRepository connectionRepository;
+    private final com.queryforge.model.ModelSessionAffinity modelSessionAffinity;
 
-    public ConversationService(ConversationRepository repository, ConnectionRepository connectionRepository) {
+    public ConversationService(ConversationRepository repository, ConnectionRepository connectionRepository,
+                               com.queryforge.model.ModelSessionAffinity modelSessionAffinity) {
         this.repository = repository;
         this.connectionRepository = connectionRepository;
+        this.modelSessionAffinity = modelSessionAffinity;
     }
 
     public ConversationSummaryResponse create(Long userId, CreateConversationRequest request) {
@@ -103,6 +106,8 @@ public class ConversationService {
         if (repository.delete(id, userId) == 0) {
             throw new ApiException(ErrorCode.CONVERSATION_NOT_FOUND, HttpStatus.NOT_FOUND, "会话不存在或无权访问");
         }
+        // P12 S4：会话删除后解除该会话的模型亲和性绑定（fail-soft，不影响删除结果）。
+        modelSessionAffinity.unbind(userId, id);
     }
 
     /** 生成开始：先落用户问题与 IN_PROGRESS 助手消息，再打开上游流。 */

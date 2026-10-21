@@ -22,6 +22,7 @@ import com.queryforge.shared.error.ApiException;
 import com.queryforge.shared.error.ErrorCode;
 import com.queryforge.datasource.repository.ConnectionRepository;
 import com.queryforge.conversation.ConversationRepository;
+import com.queryforge.model.ModelSessionAffinity;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
@@ -48,11 +49,14 @@ class ConversationServiceTest {
     @Mock
     private ConnectionRepository connectionRepository;
 
+    @Mock
+    private ModelSessionAffinity modelSessionAffinity;
+
     private ConversationService service;
 
     @BeforeEach
     void setUp() {
-        service = new ConversationService(repository, connectionRepository);
+        service = new ConversationService(repository, connectionRepository, modelSessionAffinity);
     }
 
     @Test
@@ -220,6 +224,16 @@ class ConversationServiceTest {
         assertThatThrownBy(() -> service.delete(OTHER_USER_ID, CONVERSATION_ID))
                 .isInstanceOfSatisfying(ApiException.class, ex ->
                         assertThat(ex.getErrorCode()).isEqualTo(ErrorCode.CONVERSATION_NOT_FOUND));
+    }
+
+    @Test
+    @DisplayName("删除会话成功后解除该会话的模型亲和性绑定（P12 S4）")
+    void delete_shouldUnbindModelAffinity() {
+        when(repository.delete(CONVERSATION_ID, USER_ID)).thenReturn(1);
+
+        service.delete(USER_ID, CONVERSATION_ID);
+
+        verify(modelSessionAffinity).unbind(USER_ID, CONVERSATION_ID);
     }
 
     private static ConnectionConfig connection() {

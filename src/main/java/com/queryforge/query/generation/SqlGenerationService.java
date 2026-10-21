@@ -68,8 +68,10 @@ public class SqlGenerationService {
 
         LlmStream stream;
         try {
+            // P12 S4：携带 conversationId，使路由授权与模型会话亲和性按会话维度生效。
             com.queryforge.model.ModelRouteContextHolder.set(
-                    new com.queryforge.model.ModelRouteContextHolder.Context(userId, null, null, null, null));
+                    new com.queryforge.model.ModelRouteContextHolder.Context(
+                            userId, null, null, null, null, request.conversationId()));
             stream = llmClient.open(question, schemaContext);
         } catch (RuntimeException ex) {
             if (ticket != null) {

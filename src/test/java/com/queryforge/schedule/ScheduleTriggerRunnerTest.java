@@ -40,6 +40,7 @@ class ScheduleTriggerRunnerTest {
     @Mock private ScheduleRepository repository;
     @Mock private WorkflowService workflowService;
     @Mock private ScheduleAuthorizer authorizer;
+    @Mock private ScheduleRunLock scheduleRunLock;
 
     private ScheduleTriggerRunner runner;
 
@@ -47,7 +48,8 @@ class ScheduleTriggerRunnerTest {
     void setUp() {
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         ScheduleProperties properties = new ScheduleProperties(5000, 60, 10, 15, 1, 4);
-        runner = new ScheduleTriggerRunner(repository, workflowService, authorizer, properties, clock);
+        org.mockito.Mockito.lenient().when(scheduleRunLock.tryLock(anyLong(), any())).thenReturn(true);
+        runner = new ScheduleTriggerRunner(repository, workflowService, authorizer, properties, clock, scheduleRunLock);
     }
 
     private ScheduleRow schedule() {
@@ -109,6 +111,18 @@ class ScheduleTriggerRunnerTest {
         runner.runOccurrence(occurrence());
 
         verify(repository).updateOccurrence(1L, "SKIPPED", null, "CONCURRENCY_SKIPPED", "上一触发仍在运行，按并发策略跳过");
+        verify(workflowService, never()).prepareRun(anyLong(), anyLong(), any());
+    }
+
+    @Test
+    @DisplayName("Redisson 互斥锁未获取时跳过执行（同任务并发互斥，P12 S4）")
+    void runOccurrence_shouldSkipWhenScheduleLockNotAcquired() {
+        when(repository.findScheduleById(5L)).thenReturn(Optional.of(schedule()));
+        when(scheduleRunLock.tryLock(anyLong(), any())).thenReturn(false);
+
+        runner.runOccurrence(occurrence());
+
+        verify(repository).updateOccurrence(1L, "SKIPPED", null, "CONCURRENCY_SKIPPED", "同任务互斥锁未获取");
         verify(workflowService, never()).prepareRun(anyLong(), anyLong(), any());
     }
 

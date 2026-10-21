@@ -6,12 +6,9 @@ import com.queryforge.identity.RegisterRequest;
 import com.queryforge.identity.UserResponse;
 import com.queryforge.identity.AppUserPrincipal;
 import com.queryforge.identity.AuthService;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.Authentication;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.web.csrf.CsrfToken;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -45,11 +42,8 @@ public class AuthController {
     }
 
     @PostMapping("/login")
-    public UserResponse login(
-            @Valid @RequestBody LoginRequest request,
-            HttpServletRequest httpRequest,
-            HttpServletResponse httpResponse) {
-        return authService.login(request, httpRequest, httpResponse);
+    public UserResponse login(@Valid @RequestBody LoginRequest request) {
+        return authService.login(request);
     }
 
     @GetMapping("/me")
@@ -58,9 +52,8 @@ public class AuthController {
     }
 
     @PostMapping("/logout")
-    public ResponseEntity<Void> logout(
-            HttpServletRequest request, HttpServletResponse response, Authentication authentication) {
-        authService.logout(request, response, authentication);
+    public ResponseEntity<Void> logout() {
+        authService.logout();
         return ResponseEntity.noContent().build();
     }
 }

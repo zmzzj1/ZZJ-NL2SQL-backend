@@ -1,7 +1,6 @@
 package com.queryforge.identity;
 
 import com.queryforge.shared.error.ErrorCode;
-import com.queryforge.identity.UserRepository;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpStatus;
@@ -16,14 +15,16 @@ import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
-import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
-import org.springframework.security.web.context.SecurityContextRepository;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
 import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 
 /**
- * 服务端 Session + HttpOnly Cookie + CSRF；不使用前端 Token 存储。
- * 认证接口公开，其余 /api/v1/** 必须登录。
+ * P12 S2：Sa-Token 登录会话 + Spring Security 无状态授权。
+ *
+ * <p>身份唯一来源是 Sa-Token（Redis 持久化，见 {@link SaTokenIdentityService}）；
+ * 服务端 HTTP Session 不再承载身份（STATELESS），旧 JSESSIONID 自动失去一切权限。
+ * Cookie CSRF 防护保持不变：XSRF-TOKEN  Cookie（JS 可读）+ X-XSRF-TOKEN 请求头。
  */
 @Configuration
 @EnableWebSecurity
@@ -49,14 +50,9 @@ public class SecurityConfig {
     }
 
     @Bean
-    public SecurityContextRepository securityContextRepository() {
-        return new HttpSessionSecurityContextRepository();
-    }
-
-    @Bean
     public SecurityFilterChain securityFilterChain(
             HttpSecurity http,
-            SecurityContextRepository securityContextRepository,
+            SaTokenIdentityService saTokenIdentityService,
             SecurityErrorWriter errorWriter) throws Exception {
         CookieCsrfTokenRepository csrfRepository = CookieCsrfTokenRepository.withHttpOnlyFalse();
         csrfRepository.setCookieCustomizer(builder -> builder.path("/").sameSite("Lax"));
@@ -87,8 +83,9 @@ public class SecurityConfig {
                                 HttpStatus.FORBIDDEN.value(),
                                 ErrorCode.FORBIDDEN,
                                 "没有访问该资源的权限")))
-                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
-                .securityContext(context -> context.securityContextRepository(securityContextRepository))
+                // 身份只来自 Sa-Token/Redis：禁用 Spring Security 服务端 Session。
+                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .addFilterBefore(new SaTokenAuthFilter(saTokenIdentityService), AuthorizationFilter.class)
                 .requestCache(cache -> cache.disable())
                 .formLogin(form -> form.disable())
                 .httpBasic(basic -> basic.disable())

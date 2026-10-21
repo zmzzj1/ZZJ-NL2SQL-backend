@@ -20,6 +20,9 @@ import com.queryforge.agent.context.TokenEstimator;
 import com.queryforge.agent.graph.AgentGraphStateService;
 import com.queryforge.agent.graph.GraphNode;
 import com.queryforge.agent.roles.RoleAssigner;
+import com.queryforge.model.ModelRouteContextHolder;
+import com.queryforge.schedule.AgentPlanStore;
+import com.queryforge.schedule.AgentPlanStore.PlanStep;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -93,6 +96,8 @@ public class AgentRunService {
     private final MemoryService memoryService;
     private final AgentGraphStateService graphStateService;
     private final RoleAssigner roleAssigner;
+    private final com.queryforge.schedule.AgentPlanStore planStore;
+    private final ApprovalSessionStore approvalSessionStore;
 
     public AgentRunService(
             AgentRunRepository repository,
@@ -110,7 +115,9 @@ public class AgentRunService {
             SkillService skillService,
             MemoryService memoryService,
             AgentGraphStateService graphStateService,
-            RoleAssigner roleAssigner) {
+            RoleAssigner roleAssigner,
+            AgentPlanStore planStore,
+            ApprovalSessionStore approvalSessionStore) {
         this.repository = repository;
         this.conversationService = conversationService;
         this.connectionService = connectionService;
@@ -127,6 +134,8 @@ public class AgentRunService {
         this.memoryService = memoryService;
         this.graphStateService = graphStateService;
         this.roleAssigner = roleAssigner;
+        this.planStore = planStore;
+        this.approvalSessionStore = approvalSessionStore;
     }
 
     public PreparedRun prepareStart(Long userId, CreateAgentRunRequest request) {
@@ -174,6 +183,10 @@ public class AgentRunService {
 
     public void startRun(PreparedRun run, OutputStream outputStream) {
         SseEventWriter writer = new SseEventWriter(outputStream, objectMapper);
+        // P9/P12：路由上下文（含 conversationId，供授权与模型会话亲和性）。
+        ModelRouteContextHolder.set(new ModelRouteContextHolder.Context(
+                run.userId(), run.workspaceId(), null, run.runId(),
+                run.config() == null ? null : run.config().agentId(), run.conversationId()));
         try {
             writer.event("run.started",
                     new AgentStreamEvents.RunStarted(run.runId(), run.conversationId()));
@@ -241,6 +254,8 @@ public class AgentRunService {
         } catch (RuntimeException ex) {
             log.warn("agent_plan_failed runId={} message={}", run.runId(), ex.getMessage());
             failRunWithEventQuietly(run.runId(), "AGENT_PLAN_FAILED", "规划失败，请稍后重试", writer);
+        } finally {
+            ModelRouteContextHolder.clear();
         }
     }
 
@@ -309,7 +324,41 @@ public class AgentRunService {
                 steps.stream()
                         .map(step -> new AgentStreamEvents.PlanStep(step.id(), step.sequence(), step.objective()))
                         .toList()));
+        // P12 S4：计划短期状态入 Redis（DB agent_steps 仍为事实来源）。
+        savePlanSnapshot(run.runId(), steps);
         advance(run, steps.get(0), schema, writer);
+    }
+
+    /** P12 S4 场景一：保存计划快照（TTL 6h；终态路径删除）。 */
+    private void savePlanSnapshot(Long runId, List<AgentStep> steps) {
+        try {
+            List<PlanStep> planSteps = steps.stream()
+                    .map(step -> new PlanStep(step.sequence(), step.objective(),
+                            step.status() == StepStatus.SUCCEEDED))
+                    .toList();
+            planStore.save(String.valueOf(runId), AgentPlanStore.PlanSnapshot.of(runId, planSteps));
+        } catch (RuntimeException ex) {
+            log.debug("agent_plan_snapshot_skipped runId={} message={}", runId, ex.getMessage());
+        }
+    }
+
+    /** P12 S4 场景一：推进计划快照进度（RLock 保护的读-改-写；Redis 不可用时跳过）。 */
+    private void advancePlanSnapshot(Long runId, int completedSequence) {
+        try {
+            planStore.withLock(String.valueOf(runId), () -> planStore.load(String.valueOf(runId)).ifPresent(
+                    snapshot -> planStore.save(String.valueOf(runId), snapshot.withCompleted(completedSequence))));
+        } catch (RuntimeException ex) {
+            log.debug("agent_plan_progress_skipped runId={} message={}", runId, ex.getMessage());
+        }
+    }
+
+    /** P12 S4 场景一：运行终态清理计划快照。 */
+    private void clearPlanSnapshot(Long runId) {
+        try {
+            planStore.remove(String.valueOf(runId));
+        } catch (RuntimeException ex) {
+            log.debug("agent_plan_clear_skipped runId={} message={}", runId, ex.getMessage());
+        }
     }
 
     public PreparedApproval prepareApproval(Long userId, Long runId, Long stepId,
@@ -331,6 +380,12 @@ public class AgentRunService {
         }
         if (step.status() != StepStatus.WAITING_APPROVAL) {
             throw conflict("该步骤当前不可确认");
+        }
+        // P12 S4 场景二：先消费短期授权令牌（RLock 一次性读取+删除，防并发重复领取）。
+        // MISSING=已过期/已被消费；UNAVAILABLE=Redis 不可用或锁争用，交回 DB claim 裁决。
+        ApprovalSessionStore.Claim tokenClaim = approvalSessionStore.claim(runId, stepId);
+        if (tokenClaim == ApprovalSessionStore.Claim.MISSING) {
+            throw conflict("审批上下文已过期或已被处理，请刷新后重新确认");
         }
         String database = databaseOf(userId, run);
         int claimed = repository.claimStep(runId, stepId, request.sqlVersion());
@@ -360,6 +415,9 @@ public class AgentRunService {
         SseEventWriter writer = new SseEventWriter(outputStream, objectMapper);
         AgentRun run = approval.run();
         AgentStep step = approval.step();
+        // P9/P12：继续执行的 LLM 调用同样携带路由上下文（会话亲和性按会话生效）。
+        ModelRouteContextHolder.set(new ModelRouteContextHolder.Context(
+                approval.userId(), null, null, run.id(), run.agentId(), run.conversationId()));
         try {
             if (approval.replay()) {
                 writer.event("step.succeeded", new AgentStreamEvents.StepSucceeded(
@@ -389,6 +447,8 @@ public class AgentRunService {
         } catch (RuntimeException ex) {
             log.warn("agent_step_failed runId={} stepId={} message={}", run.id(), step.id(), ex.getMessage());
             failStepAndRunQuietly(run, step, "AGENT_STEP_FAILED", "步骤执行失败", writer);
+        } finally {
+            ModelRouteContextHolder.clear();
         }
     }
 
@@ -405,6 +465,9 @@ public class AgentRunService {
         repository.rejectStep(stepId, "用户拒绝执行该 SQL");
         repository.updateRunStatus(runId, RunStatus.CANCELED, null, "AGENT_STEP_REJECTED", "用户拒绝执行该 SQL");
         graphStateService.enter(runId, GraphNode.CANCELED, null);
+        // P12 S4：拒绝后解除待审批令牌与计划快照。
+        approvalSessionStore.remove(runId, stepId);
+        clearPlanSnapshot(runId);
     }
 
     @Transactional
@@ -415,6 +478,9 @@ public class AgentRunService {
             repository.cancelPendingSteps(runId);
         }
         graphStateService.enter(runId, GraphNode.CANCELED, null);
+        // P12 S4：取消后解除该运行全部待审批令牌与计划快照。
+        approvalSessionStore.removeRun(runId);
+        clearPlanSnapshot(runId);
     }
 
     public AgentRunResponse detail(Long userId, Long runId) {
@@ -504,6 +570,8 @@ public class AgentRunService {
                 step.id(), validated, step.sqlVersion() + 1));
         writer.event("approval.required", new AgentStreamEvents.ApprovalRequired(
                 step.id(), step.sqlVersion() + 1));
+        // P12 S4 场景二：修复后重新待审批，换发新版本令牌。
+        approvalSessionStore.register(run.id(), step.id(), step.sqlVersion() + 1, approval.database());
     }
 
     private void advance(PreparedRun run, AgentStep step, String schema, SseEventWriter writer)
@@ -557,6 +625,8 @@ public class AgentRunService {
         graphStateService.markWaitingApproval(run.runId(), GraphNode.WAITING_SQL_APPROVAL, writer);
         writer.event("step.sql_ready", new AgentStreamEvents.StepSqlReady(step.id(), sql, nextVersion));
         writer.event("approval.required", new AgentStreamEvents.ApprovalRequired(step.id(), nextVersion));
+        // P12 S4 场景二：登记待审批短期授权上下文（RLock 保护的领取见 prepareApproval）。
+        approvalSessionStore.register(run.runId(), step.id(), nextVersion, run.database());
     }
 
     /** 按任务问题选择绑定的已发布 Skill 并渲染指引；无相关 Skill 时返回空串。 */
@@ -648,6 +718,8 @@ public class AgentRunService {
         Optional<AgentStep> next = steps.stream()
                 .filter(step -> step.sequence() > approval.step().sequence() && step.status() == StepStatus.PENDING)
                 .findFirst();
+        // P12 S4 场景一：步骤完成，推进短期计划状态（RLock 保护；DB 仍为准）。
+        advancePlanSnapshot(run.id(), approval.step().sequence());
         if (next.isPresent()) {
             PreparedRun continuation = new PreparedRun(
                     run.id(), approval.userId(), run.conversationId(),
@@ -674,6 +746,9 @@ public class AgentRunService {
         conversationService.appendMessage(
                 run.conversationId(), MessageRole.ASSISTANT, summary, MessageStatus.COMPLETED);
         writer.event("run.completed", new AgentStreamEvents.RunCompleted(run.id(), summary));
+        // P12 S4：运行完成，清理短期状态（令牌 + 计划快照）。
+        approvalSessionStore.removeRun(run.id());
+        clearPlanSnapshot(run.id());
         PreparedRun prepared = new PreparedRun(
                 run.id(), approval.userId(), run.conversationId(), run.connectionId(), approval.database(),
                 run.question(), approval.config());
@@ -772,6 +847,9 @@ public class AgentRunService {
         graphStateService.enter(run.id(), GraphNode.FAILED, writer);
         writer.event("step.failed", new AgentStreamEvents.StepFailed(step.id(), code.name(), safe));
         writer.event("run.failed", new AgentStreamEvents.RunFailed(run.id(), code.name(), safe));
+        // P12 S4：终态清理短期状态。
+        approvalSessionStore.removeRun(run.id());
+        clearPlanSnapshot(run.id());
     }
 
     private void failStepAndRun(PreparedRun run, AgentStep step, ErrorCode code, String message,
@@ -782,6 +860,9 @@ public class AgentRunService {
         graphStateService.enter(run.runId(), GraphNode.FAILED, writer);
         writer.event("step.failed", new AgentStreamEvents.StepFailed(step.id(), code.name(), safe));
         writer.event("run.failed", new AgentStreamEvents.RunFailed(run.runId(), code.name(), safe));
+        // P12 S4：终态清理短期状态。
+        approvalSessionStore.removeRun(run.runId());
+        clearPlanSnapshot(run.runId());
     }
 
     private void failStepAndRunQuietly(AgentRun run, AgentStep step, String code, String message,
@@ -803,6 +884,9 @@ public class AgentRunService {
         repository.updateRunStatus(runId, RunStatus.FAILED, null, code, safe);
         graphStateService.enter(runId, GraphNode.FAILED, writer);
         writer.event("run.failed", new AgentStreamEvents.RunFailed(runId, code, safe));
+        // P12 S4：终态清理短期状态。
+        approvalSessionStore.removeRun(runId);
+        clearPlanSnapshot(runId);
     }
 
     private void failRunWithEventQuietly(Long runId, String code, String message, SseEventWriter writer) {

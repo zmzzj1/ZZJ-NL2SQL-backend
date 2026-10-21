@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -26,11 +27,11 @@ import java.sql.SQLException;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -56,8 +57,17 @@ class ConnectionServiceTest {
     @Mock
     private TargetSchemaRepository schemaRepository;
 
-    @InjectMocks
+    /** 真实 Caffeine 缓存：直接验证命中/失效语义，不用行为桩冒充缓存。 */
+    private ConnectionSchemaCache schemaCache;
+
     private ConnectionService service;
+
+    @BeforeEach
+    void setUp() {
+        schemaCache = new ConnectionSchemaCache(new SchemaCacheProperties(5, 500));
+        service = new ConnectionService(
+                repository, cipher, policy, connectionFactory, schemaRepository, schemaCache);
+    }
 
     @Test
     @DisplayName("创建 MySQL 连接时加密密码，响应不包含密码")
@@ -116,6 +126,41 @@ class ConnectionServiceTest {
     }
 
     @Test
+    @DisplayName("更新成功后 Schema 缓存与目标连接池同步失效")
+    void update_shouldInvalidateCaches() {
+        when(repository.findOwned(CONNECTION_ID, USER_ID)).thenReturn(Optional.of(config("cipher")));
+        stubPolicy();
+        when(cipher.encrypt("new-secret")).thenReturn("new-cipher");
+        when(repository.update(anyLong(), anyLong(), anyString(), anyString(), anyInt(),
+                anyString(), anyString(), anyString())).thenReturn(1);
+        stubSchema("shop_orders");
+
+        service.schema(USER_ID, CONNECTION_ID);
+        service.update(USER_ID, CONNECTION_ID, request("mysql", "new-secret"));
+
+        assertThat(schemaCache.estimatedSize()).isZero();
+        verify(connectionFactory).evict(CONNECTION_ID);
+        // 失效后再次读取会重新访问目标库，不沿用旧 Schema。
+        service.schema(USER_ID, CONNECTION_ID);
+        verify(schemaRepository, times(2)).read(any());
+    }
+
+    @Test
+    @DisplayName("删除成功后缓存与连接池同步失效")
+    void delete_shouldInvalidateCaches() {
+        when(repository.findOwned(CONNECTION_ID, USER_ID)).thenReturn(Optional.of(config("cipher")));
+        when(cipher.decrypt("cipher")).thenReturn("secret");
+        when(repository.delete(CONNECTION_ID, USER_ID)).thenReturn(1);
+        stubSchema("shop_orders");
+
+        service.schema(USER_ID, CONNECTION_ID);
+        service.delete(USER_ID, CONNECTION_ID);
+
+        assertThat(schemaCache.estimatedSize()).isZero();
+        verify(connectionFactory).evict(CONNECTION_ID);
+    }
+
+    @Test
     @DisplayName("非本人连接统一返回 404，避免枚举他人资源")
     void target_shouldRejectForeignConnection() {
         when(repository.findOwned(CONNECTION_ID, USER_ID)).thenReturn(Optional.empty());
@@ -142,7 +187,7 @@ class ConnectionServiceTest {
     }
 
     @Test
-    @DisplayName("Schema 读取失败转换为 CONNECTION_FAILED")
+    @DisplayName("Schema 读取失败转换为 CONNECTION_FAILED，且失败不写缓存")
     void schema_shouldMapFailure() {
         when(repository.findOwned(CONNECTION_ID, USER_ID)).thenReturn(Optional.of(config("cipher")));
         when(cipher.decrypt("cipher")).thenReturn("secret");
@@ -151,6 +196,22 @@ class ConnectionServiceTest {
         assertThatThrownBy(() -> service.schema(USER_ID, CONNECTION_ID))
                 .isInstanceOfSatisfying(ApiException.class, ex ->
                         assertThat(ex.getErrorCode()).isEqualTo(ErrorCode.CONNECTION_FAILED));
+        assertThat(schemaCache.estimatedSize()).isZero();
+    }
+
+    @Test
+    @DisplayName("同一连接重复读取 Schema 命中缓存，只访问一次目标库")
+    void schema_shouldHitCacheOnRepeatRead() {
+        when(repository.findOwned(CONNECTION_ID, USER_ID)).thenReturn(Optional.of(config("cipher")));
+        when(cipher.decrypt("cipher")).thenReturn("secret");
+        stubSchema("shop_orders");
+
+        service.schema(USER_ID, CONNECTION_ID);
+        SchemaResponse second = service.schema(USER_ID, CONNECTION_ID);
+
+        verify(schemaRepository, times(1)).read(any());
+        assertThat(second.tables()).extracting(SchemaResponse.SchemaTable::name)
+                .containsExactly("shop_orders");
     }
 
     @Test
@@ -158,13 +219,17 @@ class ConnectionServiceTest {
     void schemaContext_shouldIncludeTables() {
         when(repository.findOwned(CONNECTION_ID, USER_ID)).thenReturn(Optional.of(config("cipher")));
         when(cipher.decrypt("cipher")).thenReturn("secret");
-        when(schemaRepository.read(any())).thenReturn(new SchemaResponse("sql_demo_a", List.of(
-                new SchemaResponse.SchemaTable("shop_orders", List.of(
-                        new SchemaResponse.SchemaColumn("amount", "DECIMAL", false))))));
+        stubSchema("shop_orders");
 
         String context = service.schemaContext(USER_ID, CONNECTION_ID);
 
         assertThat(context).contains("sql_demo_a", "shop_orders(amount DECIMAL)");
+    }
+
+    private void stubSchema(String tableName) {
+        when(schemaRepository.read(any())).thenAnswer(invocation -> new SchemaResponse("sql_demo_a", List.of(
+                new SchemaResponse.SchemaTable(tableName, List.of(
+                        new SchemaResponse.SchemaColumn("amount", "DECIMAL", false))))));
     }
 
     private void stubPolicy() {

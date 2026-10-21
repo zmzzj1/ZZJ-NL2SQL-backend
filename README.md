@@ -183,6 +183,15 @@ mvn spring-boot:run
 - 统一状态图终态（COMPLETED/FAILED/CANCELED）不接受迟到回调覆写；审批以 `sqlVersion` + 原子领取保证重复批准/重放/双标签页不重复执行 SQL。
 - Spring AI 只作底层传输层，不替换或绕过统一模型入口；P9 的路由、授权、配额、审计、熔断与故障转移在任意传输层下都保留。
 
+## P12 基础设施集成（S1–S5）
+
+- **MyBatis-Plus（S1）**：`users` 管理实体走 `BaseMapper` + Wrapper（`@TableId(type=AUTO)` 回填自增主键）；业务 SQL 仍只走 SQL Guard + 只读执行 + 审批，不进入元数据 CRUD。
+- **Sa-Token + Redis（S2）**：Sa-Token 是唯一身份来源（`SaTokenIdentityService` + 每请求 `SaTokenAuthFilter`，`STATELESS`），HttpOnly `satoken` Cookie + 保留 Cookie CSRF；Redis 故障 fail-closed（按未登录，不发放身份）。已删除 Spring Session 身份承载，不存在双身份体系。
+- **pgvector（S3）**：独立 PostgreSQL 数据源（`PgVectorConfig`/`PgVectorStore`）存 GLOSSARY / QUESTION_KNOWLEDGE / MEMORY 三类向量投影；余弦相似度 Top-K，服务端 `userId + connectionId + vectorType`（工作空间记忆按 `workspace_id`）过滤；MySQL 授权候选集做最终复核；删除/停用同步软失效；PG/Embedding 故障 fail-soft 不阻塞主链路。
+- **Redis/Redisson 四场景（S4）**：Agent 计划短期上下文（`AgentPlanStore`，TTL + RLock）、HITL 待审批会话（`ApprovalSessionStore`，原子领取）、模型会话亲和（`ModelSessionAffinity`，短 TTL 键）、定时任务互斥（`ScheduleRunLock`，按任务 ID RLock，未获取即跳过）。
+- **Caffeine + 连接池（S5）**：连接 Schema 有界缓存（`ConnectionSchemaCache`，TTL 5min/500 条/变更显式失效）；目标库 Hikari 池按连接复用（`TargetConnectionFactory`，空闲过期即关池、`SET SESSION TRANSACTION READ ONLY`、淘汰不泄漏）。
+- MySQL 侧零新增表；PG 侧唯一增量 DDL：`src/main/resources/db/13-p12-pgvector.sql`（手工执行，不引入 Flyway）。
+
 ## 本地模型测试桩
 
 ```bash
@@ -195,4 +204,5 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn s
 
 ## 测试
 
-- `mvn verify`：261 个自动化用例，包含 Controller 切片、Service 单元测试，以及 P6–P11（分析器/报告/工具/工作流/Studio/Skill/Workspace/RAG/Memory/模型治理/定时调度/CSV 导出/统一状态图/角色门禁/分层上下文/Spring AI 传输层/路由治理）测试。
+- `mvn verify`：330 个自动化用例（59 个测试类，0 failures/0 errors/0 skipped，2026-10-21 实跑），包含 Controller 切片、Service 单元测试，以及 P6–P12（分析器/报告/工具/工作流/Studio/Skill/Workspace/RAG/Memory/模型治理/定时调度/CSV 导出/统一状态图/角色门禁/分层上下文/Spring AI 传输层/路由治理/MyBatis-Plus/Sa-Token 会话/pgvector 检索/Redisson 四场景/Caffeine 缓存与连接池）测试。
+- 真实环境用例（MySQL/PostgreSQL/Redis）在缺少对应服务时自动跳过并在报告输出原因，不冒充通过。

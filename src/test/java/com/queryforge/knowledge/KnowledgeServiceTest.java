@@ -15,6 +15,7 @@ import com.queryforge.shared.error.ApiException;
 import com.queryforge.shared.error.ErrorCode;
 import com.queryforge.datasource.repository.ConnectionRepository;
 import com.queryforge.knowledge.KnowledgeRepository;
+import com.queryforge.rag.HybridKnowledgeRetriever;
 import com.queryforge.workspace.WorkspaceAccessPolicy;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -43,11 +44,14 @@ class KnowledgeServiceTest {
     @Mock
     private WorkspaceAccessPolicy workspaceAccessPolicy;
 
+    @Mock
+    private HybridKnowledgeRetriever hybridRetriever;
+
     private KnowledgeService service;
 
     @BeforeEach
     void setUp() {
-        service = new KnowledgeService(repository, connectionRepository, workspaceAccessPolicy);
+        service = new KnowledgeService(repository, connectionRepository, workspaceAccessPolicy, hybridRetriever);
     }
 
     @Test

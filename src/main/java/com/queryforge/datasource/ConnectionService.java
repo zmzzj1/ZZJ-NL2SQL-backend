@@ -37,18 +37,21 @@ public class ConnectionService {
     private final ConnectionTargetPolicy policy;
     private final TargetConnectionFactory connectionFactory;
     private final TargetSchemaRepository schemaRepository;
+    private final ConnectionSchemaCache schemaCache;
 
     public ConnectionService(
             ConnectionRepository repository,
             CredentialCipher cipher,
             ConnectionTargetPolicy policy,
             TargetConnectionFactory connectionFactory,
-            TargetSchemaRepository schemaRepository) {
+            TargetSchemaRepository schemaRepository,
+            ConnectionSchemaCache schemaCache) {
         this.repository = repository;
         this.cipher = cipher;
         this.policy = policy;
         this.connectionFactory = connectionFactory;
         this.schemaRepository = schemaRepository;
+        this.schemaCache = schemaCache;
     }
 
     public List<ConnectionResponse> list(Long userId) {
@@ -86,6 +89,8 @@ public class ConnectionService {
         if (updated == 0) {
             throw notFound();
         }
+        // 配置已变：旧 Schema 缓存与旧连接池（含旧解密凭据）必须失效。
+        invalidateCaches(id);
         return new ConnectionResponse(id, validated.name(), SUPPORTED_ENGINE, validated.host(),
                 validated.port(), validated.database(), validated.username(), !ciphertext.isBlank());
     }
@@ -94,6 +99,7 @@ public class ConnectionService {
         if (repository.delete(id, userId) == 0) {
             throw notFound();
         }
+        invalidateCaches(id);
     }
 
     public ConnectionTestResponse test(Long userId, Long id) {
@@ -114,12 +120,19 @@ public class ConnectionService {
     public SchemaResponse schema(Long userId, Long id) {
         ConnectionTarget target = target(userId, id);
         try {
-            return schemaRepository.read(target);
+            // 归属校验通过后才进入缓存：缓存键 connectionId 只对已授权用户可见。
+            return schemaCache.get(id, key -> schemaRepository.read(target));
         } catch (TargetConnectionException ex) {
             log.warn("schema_read_failed connectionId={} type={}", id, ex.getClass().getSimpleName());
             throw new ApiException(
                     ErrorCode.CONNECTION_FAILED, HttpStatus.BAD_GATEWAY, "无法读取该数据源的表结构");
         }
+    }
+
+    /** Schema 缓存与目标连接池同步失效：DDL 变更、密码轮换、连接删除后不读到旧状态。 */
+    private void invalidateCaches(Long id) {
+        schemaCache.invalidate(id);
+        connectionFactory.evict(id);
     }
 
     /** 只读取展示信息，不解密或使用密码。 */

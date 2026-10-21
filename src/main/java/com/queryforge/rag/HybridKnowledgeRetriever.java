@@ -11,6 +11,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
@@ -20,20 +22,27 @@ import org.springframework.stereotype.Service;
  *  - 权限在数据库级候选筛选阶段生效（owner 或共享授权），不先取全库再隐藏。
  *  - 关键词为稳定基线；向量真实嵌入 + 余弦相似度；混合用可解释的 RRF 融合。
  *  - 每条命中含 sourceId/type/version/score/来源方式，可回溯。
+ *
+ * P12 S3：知识向量在写入 MySQL 索引（既有）之外，同时投影到 PostgreSQL pgvector
+ * （{@link PgVectorStore}），删除时同步失效；PG 不可用时向量写入 fail-soft，不影响主保存与关键词检索。
  */
 @Service
 public class HybridKnowledgeRetriever {
 
+    private static final Logger log = LoggerFactory.getLogger(HybridKnowledgeRetriever.class);
     private static final int MAX_HITS = 5;
     private static final int SNIPPET_CHARS = 200;
     private static final double RRF_K = 60.0;
 
     private final EmbeddingClient embeddingClient;
     private final KnowledgeIndexRepository indexRepository;
+    private final PgVectorStore pgVectorStore;
 
-    public HybridKnowledgeRetriever(EmbeddingClient embeddingClient, KnowledgeIndexRepository indexRepository) {
+    public HybridKnowledgeRetriever(EmbeddingClient embeddingClient, KnowledgeIndexRepository indexRepository,
+                                    PgVectorStore pgVectorStore) {
         this.embeddingClient = embeddingClient;
         this.indexRepository = indexRepository;
+        this.pgVectorStore = pgVectorStore;
     }
 
     /** 检索模式。 */
@@ -51,34 +60,64 @@ public class HybridKnowledgeRetriever {
      * @param mode        检索模式
      */
     public KnowledgeSearchResponse retrieve(List<KnowledgeSearchResponse.Hit> keywordHits,
-                                            Long userId, Long workspaceId, String query, Mode mode) {
+                                            Long userId, Long workspaceId, Long connectionId, String query, Mode mode) {
         return switch (mode) {
             case KEYWORD -> new KnowledgeSearchResponse(keywordHits, "KEYWORD");
-            case VECTOR -> vectorOnly(userId, workspaceId, query);
-            case HYBRID -> hybrid(keywordHits, userId, workspaceId, query);
+            case VECTOR -> vectorOnly(userId, workspaceId, connectionId, query);
+            case HYBRID -> hybrid(keywordHits, userId, workspaceId, connectionId, query);
         };
     }
 
-    /** 仅向量通道：嵌入查询 + 余弦相似度 Top-K。 */
-    private KnowledgeSearchResponse vectorOnly(Long userId, Long workspaceId, String query) {
-        List<Double> queryVector = embeddingClient.embed(query);
-        List<IndexedChunk> chunks = indexRepository.activeChunks(userId, workspaceId);
-        List<KnowledgeSearchResponse.Hit> hits = new ArrayList<>();
-        for (IndexedChunk chunk : chunks) {
-            double similarity = cosine(queryVector, chunk.embedding());
-            hits.add(new KnowledgeSearchResponse.Hit(
-                    chunk.knowledgeId(), KnowledgeType.GLOSSARY, chunk.contentSummary() == null ? "" : chunk.contentSummary(),
-                    0, similarity, chunk.contentSummary() == null ? "" : snippet(chunk.contentSummary())));
+    /** 向量命中（knowledgeId + 类型 + 摘要 + 相似度）。 */
+    private record VectorMatch(long knowledgeId, KnowledgeType type, String summary, double similarity) {
+    }
+
+    /**
+     * 向量候选：pgvector 余弦相似度（本人知识，owner+connection+type 过滤）+ MySQL 空间共享知识。
+     * 按 knowledgeId 去重合并（PG 优先、MySQL 兜底），保证 PG 缺失部分不丢数据；PG 不可用时整体回退 MySQL。
+     */
+    private List<VectorMatch> vectorMatches(Long userId, Long workspaceId, Long connectionId, List<Double> queryVector) {
+        Map<Long, VectorMatch> byId = new LinkedHashMap<>();
+        try {
+            for (String vt : List.of(PgVectorStore.TYPE_GLOSSARY, PgVectorStore.TYPE_QUESTION_KNOWLEDGE)) {
+                for (PgVectorStore.Hit h : pgVectorStore.similaritySearch(vt, userId, connectionId, queryVector, MAX_HITS)) {
+                    byId.put(h.sourceId(), new VectorMatch(h.sourceId(), fromVectorType(vt),
+                            h.contentSummary() == null ? "" : h.contentSummary(), 1.0 - h.cosineDistance()));
+                }
+            }
+        } catch (RuntimeException ex) {
+            log.warn("pg_vector_search_failed, fallback to mysql", ex);
         }
-        hits.sort(Comparator.comparingDouble(KnowledgeSearchResponse.Hit::score).reversed());
+        // MySQL：本人（PG 漏写时兜底）+ 空间共享知识（PG 无共享投影）
+        for (IndexedChunk c : indexRepository.activeChunks(userId, workspaceId)) {
+            byId.putIfAbsent(c.knowledgeId(), new VectorMatch(c.knowledgeId(), KnowledgeType.GLOSSARY,
+                    c.contentSummary() == null ? "" : c.contentSummary(), cosine(queryVector, c.embedding())));
+        }
+        return new ArrayList<>(byId.values());
+    }
+
+    private static KnowledgeType fromVectorType(String vt) {
+        return PgVectorStore.TYPE_QUESTION_KNOWLEDGE.equals(vt)
+                ? KnowledgeType.VERIFIED_SQL_EXAMPLE : KnowledgeType.GLOSSARY;
+    }
+
+    /** 仅向量通道：嵌入查询 + 相似度 Top-K。 */
+    private KnowledgeSearchResponse vectorOnly(Long userId, Long workspaceId, Long connectionId, String query) {
+        List<Double> queryVector = embeddingClient.embed(query);
+        List<VectorMatch> matches = vectorMatches(userId, workspaceId, connectionId, queryVector);
+        matches.sort(Comparator.comparingDouble(VectorMatch::similarity).reversed());
+        List<KnowledgeSearchResponse.Hit> hits = matches.stream()
+                .map(m -> new KnowledgeSearchResponse.Hit(m.knowledgeId(), m.type(), m.summary(),
+                        0, m.similarity(), snippet(m.summary())))
+                .toList();
         return new KnowledgeSearchResponse(top(hits), "VECTOR");
     }
 
     /** 混合融合：RRF 合并关键词与向量排序。 */
     private KnowledgeSearchResponse hybrid(List<KnowledgeSearchResponse.Hit> keywordHits,
-                                           Long userId, Long workspaceId, String query) {
+                                           Long userId, Long workspaceId, Long connectionId, String query) {
         List<Double> queryVector = embeddingClient.embed(query);
-        List<IndexedChunk> chunks = indexRepository.activeChunks(userId, workspaceId);
+        List<VectorMatch> matches = vectorMatches(userId, workspaceId, connectionId, queryVector);
 
         // 关键词排名：按已有得分排序的 rank
         Map<Long, Double> keywordRank = new LinkedHashMap<>();
@@ -88,14 +127,9 @@ public class HybridKnowledgeRetriever {
             keywordRank.put(keywordSorted.get(i).id(), (double) (i + 1));
         }
 
-        // 向量排名
-        List<IndexedChunk> vectorSorted = new ArrayList<>(chunks);
-        Map<Long, Double> vectorSim = new LinkedHashMap<>();
-        for (IndexedChunk chunk : chunks) {
-            vectorSim.put(chunk.knowledgeId(), cosine(queryVector, chunk.embedding()));
-        }
-        vectorSorted.sort(Comparator.comparingDouble((IndexedChunk c) -> vectorSim.getOrDefault(c.knowledgeId(), 0.0))
-                .reversed());
+        // 向量排名（按相似度降序）
+        List<VectorMatch> vectorSorted = new ArrayList<>(matches);
+        vectorSorted.sort(Comparator.comparingDouble(VectorMatch::similarity).reversed());
         Map<Long, Double> vectorRank = new LinkedHashMap<>();
         for (int i = 0; i < vectorSorted.size(); i++) {
             vectorRank.put(vectorSorted.get(i).knowledgeId(), (double) (i + 1));
@@ -115,11 +149,9 @@ public class HybridKnowledgeRetriever {
         for (KnowledgeSearchResponse.Hit hit : keywordHits) {
             meta.putIfAbsent(hit.id(), hit);
         }
-        for (IndexedChunk chunk : chunks) {
-            meta.putIfAbsent(chunk.knowledgeId(), new KnowledgeSearchResponse.Hit(
-                    chunk.knowledgeId(), KnowledgeType.GLOSSARY,
-                    chunk.contentSummary() == null ? "" : chunk.contentSummary(), 0, 0.0,
-                    chunk.contentSummary() == null ? "" : snippet(chunk.contentSummary())));
+        for (VectorMatch m : matches) {
+            meta.putIfAbsent(m.knowledgeId(), new KnowledgeSearchResponse.Hit(
+                    m.knowledgeId(), m.type(), m.summary(), 0, 0.0, snippet(m.summary())));
         }
 
         List<KnowledgeSearchResponse.Hit> hits = new ArrayList<>();
@@ -135,8 +167,9 @@ public class HybridKnowledgeRetriever {
         return new KnowledgeSearchResponse(top(hits), "HYBRID");
     }
 
-    /** 重建某知识条目的索引（发布新代，旧代 SUPERSEDED）。 */
-    public int indexKnowledge(Long knowledgeId, Long ownerId, Long workspaceId, String title, String content) {
+    /** 重建某知识条目的索引（发布新代，旧代 SUPERSEDED），并投影到 pgvector。 */
+    public int indexKnowledge(Long knowledgeId, Long ownerId, Long workspaceId, Long connectionId,
+                              KnowledgeType type, String title, String content) {
         int generation = indexRepository.currentGeneration(knowledgeId) + 1;
         indexRepository.supersede(knowledgeId);
         // 单 chunk：title + content 摘要嵌入
@@ -144,11 +177,38 @@ public class HybridKnowledgeRetriever {
         List<Double> vector = embeddingClient.embed(text);
         indexRepository.insertChunk(knowledgeId, generation, 0, ownerId, workspaceId,
                 "qwen3.7-text-embedding-flash", vector.size(), vector, snippet(title));
+        // P12 S3：双写 pgvector（先失效旧向量再写新，保证 update 换 type/connection 不残留）
+        try {
+            pgVectorStore.deactivate(PgVectorStore.TYPE_GLOSSARY, knowledgeId);
+            pgVectorStore.deactivate(PgVectorStore.TYPE_QUESTION_KNOWLEDGE, knowledgeId);
+            pgVectorStore.add(toVectorType(type), knowledgeId, ownerId, connectionId, workspaceId,
+                    vector, snippet(title));
+        } catch (RuntimeException ex) {
+            log.warn("pg_vector_index_failed knowledgeId={} type={}", knowledgeId, type, ex);
+        }
         return generation;
+    }
+
+    /** 知识删除/更新时同步失效：MySQL 旧代 SUPERSEDED + pgvector 软删除。 */
+    public void deindex(Long knowledgeId) {
+        indexRepository.supersede(knowledgeId);
+        try {
+            pgVectorStore.deactivate(PgVectorStore.TYPE_GLOSSARY, knowledgeId);
+            pgVectorStore.deactivate(PgVectorStore.TYPE_QUESTION_KNOWLEDGE, knowledgeId);
+        } catch (RuntimeException ex) {
+            log.warn("pg_vector_deindex_failed knowledgeId={}", knowledgeId, ex);
+        }
     }
 
     public boolean indexReady(Long userId) {
         return indexRepository.activeCount(userId) > 0;
+    }
+
+    /** KnowledgeType → pgvector vector_type 映射。 */
+    private static String toVectorType(KnowledgeType type) {
+        return type == KnowledgeType.GLOSSARY
+                ? PgVectorStore.TYPE_GLOSSARY
+                : PgVectorStore.TYPE_QUESTION_KNOWLEDGE;
     }
 
     private static List<KnowledgeSearchResponse.Hit> top(List<KnowledgeSearchResponse.Hit> hits) {

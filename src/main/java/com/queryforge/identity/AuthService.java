@@ -7,25 +7,21 @@ import com.queryforge.shared.error.ApiException;
 import com.queryforge.shared.error.ErrorCode;
 import com.queryforge.identity.UserRepository;
 import com.queryforge.identity.AppUserPrincipal;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
-import jakarta.servlet.http.HttpSession;
 import java.util.Locale;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
-import org.springframework.security.core.context.SecurityContext;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.security.web.authentication.logout.SecurityContextLogoutHandler;
-import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.stereotype.Service;
 
 /**
- * 最小身份闭环：注册、密码校验、Session 建立与注销。
+ * 最小身份闭环：注册、密码校验、Sa-Token 登录态建立与注销。
  * 密码只保存 BCrypt 摘要，不写日志、不返回客户端。
+ *
+ * <p>P12 S2：登录成功后由 {@link SaTokenIdentityService#establish} 在 Redis 建立
+ * Sa-Token 会话（token 每次登录随机生成，天然防止会话固定）；注销删除 token 与会话。
  */
 @Service
 public class AuthService {
@@ -35,17 +31,17 @@ public class AuthService {
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
     private final AuthenticationManager authenticationManager;
-    private final SecurityContextRepository securityContextRepository;
+    private final SaTokenIdentityService identityService;
 
     public AuthService(
             UserRepository userRepository,
             PasswordEncoder passwordEncoder,
             AuthenticationManager authenticationManager,
-            SecurityContextRepository securityContextRepository) {
+            SaTokenIdentityService identityService) {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
         this.authenticationManager = authenticationManager;
-        this.securityContextRepository = securityContextRepository;
+        this.identityService = identityService;
     }
 
     public UserResponse register(RegisterRequest request) {
@@ -64,7 +60,7 @@ public class AuthService {
         return new UserResponse(id, email, displayName);
     }
 
-    public UserResponse login(LoginRequest request, HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+    public UserResponse login(LoginRequest request) {
         Authentication authentication;
         try {
             authentication = authenticationManager.authenticate(
@@ -73,18 +69,9 @@ public class AuthService {
             throw new ApiException(ErrorCode.UNAUTHENTICATED, HttpStatus.UNAUTHORIZED, "邮箱或密码不正确");
         }
 
-        // 登录成功后更换 Session ID，防止会话固定。
-        HttpSession existingSession = httpRequest.getSession(false);
-        if (existingSession != null) {
-            httpRequest.changeSessionId();
-        }
-
-        SecurityContext context = SecurityContextHolder.createEmptyContext();
-        context.setAuthentication(authentication);
-        SecurityContextHolder.setContext(context);
-        securityContextRepository.saveContext(context, httpRequest, httpResponse);
-
+        // 密码校验通过后才建立 Sa-Token 会话；token 随机生成并写入 Redis，响应 cookie 由 Sa-Token 负责。
         AppUserPrincipal principal = (AppUserPrincipal) authentication.getPrincipal();
+        identityService.establish(principal);
         return new UserResponse(principal.id(), principal.email(), principal.displayName());
     }
 
@@ -92,8 +79,9 @@ public class AuthService {
         return new UserResponse(principal.id(), principal.email(), principal.displayName());
     }
 
-    public void logout(HttpServletRequest request, HttpServletResponse response, Authentication authentication) {
-        new SecurityContextLogoutHandler().logout(request, response, authentication);
+    /** 注销：删除 Sa-Token token 与账号会话，旧请求持有的 token 立即失效。 */
+    public void logout() {
+        identityService.invalidate();
     }
 
     private static void validatePassword(String password) {

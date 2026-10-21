@@ -44,14 +44,17 @@ public class RoutedLlmClient implements LlmClient {
     private final InvocationRecorder recorder;
     private final LlmProperties properties;
     private final ModelTransport transport;
+    private final ModelSessionAffinity sessionAffinity;
 
     public RoutedLlmClient(ModelRouter router, ModelCatalogService catalog, InvocationRecorder recorder,
-                           LlmProperties properties, ModelTransport transport) {
+                           LlmProperties properties, ModelTransport transport,
+                           ModelSessionAffinity sessionAffinity) {
         this.router = router;
         this.catalog = catalog;
         this.recorder = recorder;
         this.properties = properties;
         this.transport = transport;
+        this.sessionAffinity = sessionAffinity;
     }
 
     /** 路由策略 id / 授权上下文由 ModelRouteContextHolder 提供（业务层设置）。 */
@@ -65,19 +68,29 @@ public class RoutedLlmClient implements LlmClient {
         ModelRouteContextHolder.Context context = ModelRouteContextHolder.get();
         CallRequirement requirement = CallRequirement.chat(true, false, false);
 
+        // P12 S4：会话亲和性——解析已绑定模型（仍走完整过滤链，见 ModelRouter）。
+        Long affinityProfileId = context == null ? null
+                : sessionAffinity.resolve(context.userId(), context.conversationId()).orElse(null);
+
         RouteDecision decision;
         try {
-            decision = router.route(
+            decision = router.routeWithAffinity(
                     context == null ? null : context.policyId(),
                     context == null ? null : context.userId(),
                     context == null ? null : context.workspaceId(),
-                    requirement);
+                    requirement,
+                    affinityProfileId);
         } catch (ApiException ex) {
             // 目录为空或未授权时，回退到 LlmProperties 的默认单 Provider，保证 P1-P8 行为不变。
             if (ex.getErrorCode() == ErrorCode.MODEL_UNAVAILABLE) {
                 return openDefault(systemPrompt, userPrompt);
             }
             throw ex;
+        }
+
+        // 路由成功后刷新会话绑定（滑动 TTL）；默认 Provider 回退不绑定（非目录 profile）。
+        if (context != null) {
+            sessionAffinity.bind(context.userId(), context.conversationId(), decision.profile().id());
         }
 
         String callId = recorder.newCallId();

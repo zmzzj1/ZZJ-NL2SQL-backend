@@ -18,6 +18,7 @@ import com.queryforge.model.ModelEntities.Profile;
 import com.queryforge.model.ModelEntities.Provider;
 import com.queryforge.model.ModelRouter.CallRequirement;
 import com.queryforge.model.ModelRouter.RouteDecision;
+import com.queryforge.testutil.RedissonFixtures;
 import com.queryforge.shared.error.ApiException;
 import java.time.Duration;
 import java.util.List;
@@ -65,7 +66,7 @@ class RoutedLlmClientTransportTest {
         client = new RoutedLlmClient(router, catalog, recorder,
                 new LlmProperties("http://127.0.0.1:0/v1", "key", "default-model",
                         Duration.ofSeconds(5), Duration.ofSeconds(10)),
-                transport);
+                transport, new ModelSessionAffinity(RedissonFixtures.noopRedisson()));
     }
 
     @Test
@@ -73,7 +74,7 @@ class RoutedLlmClientTransportTest {
     void routesBeforeTransport_andUsesSelectedProfile() throws Exception {
         Profile p = profile(1L);
         Provider prov = provider();
-        when(router.route(any(), anyLong(), any(), any(CallRequirement.class)))
+        when(router.routeWithAffinity(any(), anyLong(), any(), any(CallRequirement.class), any()))
                 .thenReturn(new RouteDecision(p, prov, RouteStrategy.ROUND_ROBIN, ""));
         when(catalog.requireProvider(10L)).thenReturn(prov);
         when(catalog.decryptKey(prov)).thenReturn("key");
@@ -85,7 +86,7 @@ class RoutedLlmClientTransportTest {
         ModelRouteContextHolder.clear();
 
         InOrder order = inOrder(router, transport);
-        order.verify(router).route(any(), anyLong(), any(), any(CallRequirement.class));
+        order.verify(router).routeWithAffinity(any(), anyLong(), any(), any(CallRequirement.class), any());
         order.verify(transport).stream(eq("http://p.example/v1"), eq("key"), eq("model-1"), eq("sys"), eq("user"));
         assertThat(stream).isNotNull();
     }
@@ -96,7 +97,7 @@ class RoutedLlmClientTransportTest {
         Profile primary = profile(1L);
         Profile fallback = profile(2L);
         Provider prov = provider();
-        when(router.route(any(), anyLong(), any(), any(CallRequirement.class)))
+        when(router.routeWithAffinity(any(), anyLong(), any(), any(CallRequirement.class), any()))
                 .thenReturn(new RouteDecision(primary, prov, RouteStrategy.ROUND_ROBIN, "", List.of(fallback)));
         when(catalog.requireProvider(10L)).thenReturn(prov);
         when(catalog.decryptKey(prov)).thenReturn("key");
@@ -118,7 +119,7 @@ class RoutedLlmClientTransportTest {
     void nonRetryableStatusStops() throws Exception {
         Profile p = profile(1L);
         Provider prov = provider();
-        when(router.route(any(), anyLong(), any(), any(CallRequirement.class)))
+        when(router.routeWithAffinity(any(), anyLong(), any(), any(CallRequirement.class), any()))
                 .thenReturn(new RouteDecision(p, prov, RouteStrategy.ROUND_ROBIN, ""));
         when(catalog.requireProvider(10L)).thenReturn(prov);
         when(catalog.decryptKey(prov)).thenReturn("key");

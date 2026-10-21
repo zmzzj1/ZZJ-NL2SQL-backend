@@ -35,14 +35,17 @@ public class ScheduleTriggerRunner {
     private final ScheduleAuthorizer authorizer;
     private final ScheduleProperties properties;
     private final Clock clock;
+    private final ScheduleRunLock scheduleRunLock;
 
     public ScheduleTriggerRunner(ScheduleRepository repository, WorkflowService workflowService,
-                                 ScheduleAuthorizer authorizer, ScheduleProperties properties, Clock clock) {
+                                 ScheduleAuthorizer authorizer, ScheduleProperties properties, Clock clock,
+                                 ScheduleRunLock scheduleRunLock) {
         this.repository = repository;
         this.workflowService = workflowService;
         this.authorizer = authorizer;
         this.properties = properties;
         this.clock = clock;
+        this.scheduleRunLock = scheduleRunLock;
     }
 
     /** 领取并执行一个 occurrence（调度器调用）。返回是否成功领取。 */
@@ -63,39 +66,51 @@ public class ScheduleTriggerRunner {
         ScheduleRow schedule = repository.findScheduleById(occurrence.scheduleId())
                 .orElseThrow(() -> new IllegalStateException("schedule " + occurrence.scheduleId() + " 不存在"));
 
-        // 并发策略校验：已有活跃 occurrence 时按策略处理。
-        if (shouldSkipForConcurrency(schedule)) {
+        // 跨实例互斥（Redisson RLock）：同 schedule 已有实例在跑则跳过，减少 DB 领取争用。
+        // 最终幂等仍由 claimOccurrence 的 DB 唯一约束保证。
+        boolean locked = scheduleRunLock.tryLock(schedule.id(), Duration.ofSeconds(properties.leaseSeconds()));
+        if (!locked) {
             repository.updateOccurrence(occurrence.id(), ScheduleStatus.Occurrence.SKIPPED.name(),
-                    null, ErrorCodeName.CONCURRENCY_SKIPPED, "上一触发仍在运行，按并发策略跳过");
+                    null, ErrorCodeName.CONCURRENCY_SKIPPED, "同任务互斥锁未获取");
             return;
         }
-
-        // 重鉴权：撤权/资源失效后不再执行。
-        String authError = authorizer.errorIfUnauthorized(schedule);
-        if (authError != null) {
-            repository.updateOccurrence(occurrence.id(), ScheduleStatus.Occurrence.SKIPPED.name(),
-                    null, authError, "触发前鉴权失败");
-            return;
-        }
-
         try {
-            WorkflowService.PreparedRun prepared = workflowService.prepareRun(
-                    schedule.ownerUserId(), schedule.workflowId(),
-                    new StartWorkflowRunRequest(
-                            schedule.connectionId(), schedule.conversationId(), schedule.userInput(),
-                            schedule.agentId(), schedule.agentVersionId()));
+            // 并发策略校验：已有活跃 occurrence 时按策略处理。
+            if (shouldSkipForConcurrency(schedule)) {
+                repository.updateOccurrence(occurrence.id(), ScheduleStatus.Occurrence.SKIPPED.name(),
+                        null, ErrorCodeName.CONCURRENCY_SKIPPED, "上一触发仍在运行，按并发策略跳过");
+                return;
+            }
 
-            repository.updateOccurrence(occurrence.id(), ScheduleStatus.Occurrence.RUNNING.name(),
-                    prepared.runId(), null, null);
+            // 重鉴权：撤权/资源失效后不再执行。
+            String authError = authorizer.errorIfUnauthorized(schedule);
+            if (authError != null) {
+                repository.updateOccurrence(occurrence.id(), ScheduleStatus.Occurrence.SKIPPED.name(),
+                        null, authError, "触发前鉴权失败");
+                return;
+            }
 
-            workflowService.startRun(prepared, OutputStream.nullOutputStream());
+            try {
+                WorkflowService.PreparedRun prepared = workflowService.prepareRun(
+                        schedule.ownerUserId(), schedule.workflowId(),
+                        new StartWorkflowRunRequest(
+                                schedule.connectionId(), schedule.conversationId(), schedule.userInput(),
+                                schedule.agentId(), schedule.agentVersionId()));
 
-            syncFromRun(schedule, occurrence.id(), prepared.runId());
-        } catch (Exception ex) {
-            log.warn("schedule_run_failed scheduleId={} occurrenceId={} message={}",
-                    schedule.id(), occurrence.id(), ex.getMessage());
-            repository.updateOccurrence(occurrence.id(), ScheduleStatus.Occurrence.FAILED.name(),
-                    null, "WORKFLOW_FAILED", safe(ex.getMessage()));
+                repository.updateOccurrence(occurrence.id(), ScheduleStatus.Occurrence.RUNNING.name(),
+                        prepared.runId(), null, null);
+
+                workflowService.startRun(prepared, OutputStream.nullOutputStream());
+
+                syncFromRun(schedule, occurrence.id(), prepared.runId());
+            } catch (Exception ex) {
+                log.warn("schedule_run_failed scheduleId={} occurrenceId={} message={}",
+                        schedule.id(), occurrence.id(), ex.getMessage());
+                repository.updateOccurrence(occurrence.id(), ScheduleStatus.Occurrence.FAILED.name(),
+                        null, "WORKFLOW_FAILED", safe(ex.getMessage()));
+            }
+        } finally {
+            scheduleRunLock.unlock(schedule.id());
         }
     }
 
