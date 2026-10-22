@@ -1,8 +1,10 @@
 package com.queryforge.domain.identity;
 
 import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import java.time.LocalDateTime;
 
 /**
  * P12 S1：管理库 users 表的 MyBatis-Plus 实体（平台管理元数据，非业务库数据）。
@@ -20,6 +22,9 @@ public class UserEntity {
     private String displayName;
     private String passwordHash;
     private String role;
+    /** 注册时间由数据库默认值维护，实体只读（管理端展示需要，不参与写入）。 */
+    @TableField("created_at")
+    private LocalDateTime createdAt;
 
     public UserEntity() {
     }
@@ -62,5 +67,13 @@ public class UserEntity {
 
     public void setRole(String role) {
         this.role = role;
+    }
+
+    public LocalDateTime getCreatedAt() {
+        return createdAt;
+    }
+
+    public void setCreatedAt(LocalDateTime createdAt) {
+        this.createdAt = createdAt;
     }
 }

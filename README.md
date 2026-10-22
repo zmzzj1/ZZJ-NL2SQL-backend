@@ -1,6 +1,6 @@
 # QueryForge 后端（真实用户与多数据源）
 
-Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性；P10 新增工作流定时调度与安全 CSV 导出；P11 新增统一 Agent 执行内核（统一状态图 + 检查点）、专业角色选择与权限门禁、L1–L4 分层上下文压缩，并让 Spring AI 作为可选的底层模型传输层（不绕过 P9 路由治理）。
+Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性；P10 新增工作流定时调度与安全 CSV 导出；P11 新增统一 Agent 执行内核；P13 将公开入口拆为 Gateway，并新增通过 Dubbo 查询核心业务数据的独立 Admin 服务。
 
 ## 环境要求
 
@@ -29,6 +29,7 @@ Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL �
 - 长期记忆：个人/空间作用域、类型、来源、置信度、去重、禁用与检索，并按用户及空间权限隔离。
 - 模型治理：供应商与能力档案、用户/空间/Agent 授权、版本化路由策略、熔断、有界重试和故障转移。
 - 平台管理：模型调用记录、用量与失败分类、配额、管理审计；管理接口仅允许服务端持久化的 PLATFORM_ADMIN。
+- 独立管理服务：经 Gateway 提供管理员用户分页和平台统计概览，Admin 通过 Dubbo 调用核心 Service，不复制业务数据访问层。
 - 统一状态图：运行节点（ROUTING/PLANNING/CONTEXT_BUILDING/RUNNING/SQL_GENERATION/WAITING_SQL_APPROVAL/SQL_EXECUTION/REPORT_GENERATION/COMPLETED/FAILED/CANCELED 等）带合法性校验，检查点持久化到 `agent_graph_checkpoints`，SSE `node.*` 轨迹与详情恢复同一套状态。
 - 专业角色：Manager/Planner/Data Analyst/Code Analyst/Tool Assistant/Report Assistant 具备角色定义、输入契约与工具白名单，运行时拒绝越权调用；RoleAssigner 的选择结果持久化到步骤并由前端展示。
 - L1–L4 分层上下文：渐进装入、脱敏压缩元数据、预算压力下保留审批/授权/关键事实，Token 估算明确标注为近似值。
@@ -110,12 +111,14 @@ Spring 属性（通过 `--app.*=value` 或外部配置传入）：
 
 ## 启动与测试
 
-P13-M1 起本目录是 Maven 聚合父工程（`packaging=pom`），含两个可独立运行的子模块：
+P13 起本目录是 Maven 聚合父工程（`packaging=pom`），包含四个子模块：
 
 | 模块 | 端口 | 说明 |
 | --- | --- | --- |
 | `zzj-service` | 8081（仅回环） | 全部既有核心业务（SQL/Agent/Workflow/RAG/Memory/Studio/认证），注册到 Nacos |
 | `zzj-gateway` | 8080 | 公开接入层：WebFlux Gateway + Nacos Discovery + LoadBalancer，转发 `/api/**` 到 `lb://zzj-service` |
+| `zzj-common` | 不监听端口 | Admin 与 Service 共享的最小 Dubbo 接口和可序列化 DTO |
+| `zzj-admin` | 8083 | 独立管理查询服务；校验共享登录会话并经 Dubbo 调用 `zzj-service` |
 
 前端 `/api` 仍然指向 8080（Vite 代理不变），因此页面代码无需改动；8080 现在是网关而不是业务进程。
 
@@ -144,6 +147,8 @@ $env:PG_PASSWORD='<postgres-password>'
 java -jar zzj-service/target/zzj-service.jar --server.port=8081
 # 3) zzj-gateway
 java -jar zzj-gateway/target/zzj-gateway.jar --server.port=8080
+# 4) zzj-admin（需要 Redis、Nacos 与运行中的 zzj-service）
+java -jar zzj-admin/target/zzj-admin.jar --server.port=8083
 ```
 
 也可使用 `scripts/start-local.sh {nacos|service|gateway}`。
@@ -153,6 +158,7 @@ java -jar zzj-gateway/target/zzj-gateway.jar --server.port=8080
 - 经网关：`GET http://127.0.0.1:8080/api/health`（转发到 Service）
 - 直连排障：`GET http://127.0.0.1:8081/api/health`（仅回环可达，不作为公开入口）
 - 网关自身：`GET http://127.0.0.1:8080/actuator/health`
+- Admin 自身：`GET http://127.0.0.1:8083/actuator/health`
 
 ## 接口
 
@@ -193,6 +199,8 @@ java -jar zzj-gateway/target/zzj-gateway.jar --server.port=8080
 | POST | `/api/v1/knowledge/search` | 按权限执行 KEYWORD、VECTOR 或 HYBRID 检索 |
 | GET/POST/PATCH | `/api/v1/model/**` | 模型供应商、能力档案、授权与路由策略 |
 | GET/POST | `/api/v1/admin/**` | 管理概览、模型用量、配额和审计 |
+| GET | `/api/v1/admin/users` | 独立 Admin 服务提供的用户分页查询，仅平台管理员 |
+| GET | `/api/v1/admin/dashboard` | 独立 Admin 服务提供的真实平台统计概览，仅平台管理员 |
 
 ## 安全边界
 
@@ -240,5 +248,6 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn s
 
 ## 测试
 
-- `mvn verify`：Reactor 共 384 个自动化用例（`zzj-service` 350 个、`zzj-gateway` 34 个；0 failures/0 errors/12 skipped，2026-10-22 实跑）；跳过项均为缺少对应外部测试环境时主动跳过的集成测试。覆盖 Controller 切片、Service 单元测试，网关匿名策略/入口认证/身份头清洗/会话兼容（真实 Redis），以及 P6–P12（分析器/报告/工具/工作流/Studio/Skill/Workspace/RAG/Memory/模型治理/定时调度/CSV 导出/统一状态图/角色门禁/分层上下文/Spring AI 传输层/路由治理/MyBatis-Plus/Sa-Token 会话/pgvector 检索/Redisson 四场景/Caffeine 缓存与连接池）测试。
+- P13-M2 全量基线：`mvn verify` 共 384 个自动化用例（`zzj-service` 350 个、`zzj-gateway` 34 个；0 failures/0 errors/12 skipped，2026-10-22 实跑）；跳过项均为缺少对应外部测试环境时主动跳过的集成测试。
+- P13-M3A 定向验证：Admin 契约、Provider、Gateway 路由、共享会话、Dubbo Consumer 和 Controller 共 32 个用例通过；可用 `mvn -pl zzj-admin -am -Dtest=AdminContractTest,AdminSessionServiceTest,AdminQueryRpcClientTest,AdminQueryControllerTest -Dsurefire.failIfNoSpecifiedTests=false test` 快速复测 Admin 侧。
 - 真实环境用例（MySQL/PostgreSQL/Redis）在缺少对应服务时自动跳过并在报告输出原因，不冒充通过。

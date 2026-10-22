@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.zzj</groupId>
+    <artifactId>zzj-parent</artifactId>
+    <version>0.1.0</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>zzj-common</artifactId>
+  <name>zzj-common</name>
+  <description>跨服务共享契约：管理查询 RPC 接口与可序列化 DTO（不含运行时框架与业务 Bean）</description>
+
+  <dependencies>
+    <!-- 仅测试期使用：契约模块自身不引入任何运行时框架。 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>zzj-common</finalName>
+  </build>
+</project>

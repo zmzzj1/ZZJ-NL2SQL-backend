@@ -134,6 +134,28 @@ app:
         args:
           - ${MCP_ECHO_SCRIPT:tools/mcp-echo-server.mjs}
 
+# P13-M3A：管理查询 RPC Provider（只被 zzj-admin 经内部通道调用，不对外暴露端口到公网）。
+dubbo:
+  application:
+    name: ${SERVICE_APP_NAME:zzj-service}
+    # QoS 与业务同机部署时会争用固定端口，管理 RPC 不需要在线运维端口。
+    qos-enable: false
+  protocol:
+    name: dubbo
+    port: ${DUBBO_PROTOCOL_PORT:20880}
+    host: ${DUBBO_PROTOCOL_HOST:127.0.0.1}
+  registry:
+    address: nacos://${NACOS_SERVER_ADDR:127.0.0.1:8848}?username=${NACOS_USERNAME:}&password=${NACOS_PASSWORD:}
+    # 与 Spring Cloud 注册（DEFAULT_GROUP）分开：避免 Dubbo 实例被 Gateway 的 lb://zzj-service 选中。
+    group: ${DUBBO_REGISTRY_GROUP:DUBBO}
+    # 接口级注册：只注册 RPC 接口，不把 Dubbo 端口混进 HTTP 服务实例。
+    register-mode: interface
+    # 不把 Nacos 当作配置中心/元数据中心：本轮只做服务发现，减少依赖面。
+    use-as-config-center: false
+    use-as-metadata-center: false
+  scan:
+    base-packages: com.queryforge.trigger.admin
+
 logging:
   level:
     com.queryforge: INFO

@@ -3,6 +3,7 @@ package com.queryforge.infrastructure.persistence;
 import com.queryforge.domain.identity.AppUserPrincipal;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import java.sql.SQLIntegrityConstraintViolationException;
+import java.util.List;
 import java.util.Optional;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Repository;
@@ -31,6 +32,41 @@ public class UserRepository {
         return Optional.ofNullable(entity).map(UserRepository::toPrincipal);
     }
 
+    /** P13-M3A：按主键重建认证主体（RPC 判权只认数据库里的持久化 role）。 */
+    public Optional<AppUserPrincipal> findPrincipalById(Long id) {
+        if (id == null) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(userMapper.selectById(id)).map(UserRepository::toPrincipal);
+    }
+
+    /** P13-M3A：管理端用户检索总行数（keyword 为空即全量）。 */
+    public long countByKeyword(String keyword) {
+        return userMapper.selectCount(keywordWrapper(keyword));
+    }
+
+    /**
+     * P13-M3A：管理端用户分页（倒序返回）。
+     *
+     * <p>LIMIT/OFFSET 只由已被契约层收敛成 int 的分页参数拼出，不接受任何外部字符串，
+     * 因此不存在拼接注入面；关键词仍走参数绑定。
+     */
+    public List<UserEntity> pageByKeyword(String keyword, int page, int size) {
+        int offset = (page - 1) * size;
+        return userMapper.selectList(keywordWrapper(keyword)
+                .orderByDesc(UserEntity::getId)
+                .last(String.format("LIMIT %d OFFSET %d", size, offset)));
+    }
+
+    private static LambdaQueryWrapper<UserEntity> keywordWrapper(String keyword) {
+        LambdaQueryWrapper<UserEntity> wrapper = new LambdaQueryWrapper<>();
+        if (keyword != null && !keyword.isBlank()) {
+            String pattern = "%" + keyword + "%";
+            wrapper.and(nested -> nested.like(UserEntity::getEmail, pattern)
+                    .or().like(UserEntity::getDisplayName, pattern));
+        }
+        return wrapper;
+    }
     public boolean existsByEmail(String email) {
         return userMapper.selectCount(new LambdaQueryWrapper<UserEntity>()
                 .eq(UserEntity::getEmail, email)) > 0;

@@ -1,0 +1,69 @@
+server:
+  # P13-M3A：管理服务独立端口；仅绑定回环地址，公开入口统一由 Gateway 8080 转发。
+  address: 127.0.0.1
+  port: ${ADMIN_PORT:8083}
+  shutdown: graceful
+
+spring:
+  application:
+    # Gateway 以 lb://zzj-admin 转发两条管理查询路由，注册名必须一致。
+    name: ${ADMIN_APP_NAME:zzj-admin}
+  config:
+    import: optional:file:${ZZJ_CONFIG_DIR:./config}/local.properties
+  threads:
+    virtual:
+      enabled: true
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+        namespace: ${NACOS_NAMESPACE:public}
+        group: ${NACOS_GROUP:DEFAULT_GROUP}
+        username: ${NACOS_USERNAME:}
+        password: ${NACOS_PASSWORD:}
+        ip: ${NACOS_REGISTER_IP:127.0.0.1}
+        port: ${NACOS_REGISTER_PORT:${ADMIN_PORT:8083}}
+        heartbeat-interval: ${NACOS_HEARTBEAT_MS:5000}
+        heart-beat-timeout: ${NACOS_HEARTBEAT_TIMEOUT_MS:15000}
+        ip-delete-timeout: ${NACOS_IP_DELETE_TIMEOUT_MS:30000}
+
+# P13-M3A：Dubbo Consumer。只消费管理服务 RPC，不对外提供 RPC 服务。
+dubbo:
+  application:
+    name: ${ADMIN_APP_NAME:zzj-admin}
+    qos-enable: false
+  registry:
+    address: nacos://${NACOS_SERVER_ADDR:127.0.0.1:8848}?username=${NACOS_USERNAME:}&password=${NACOS_PASSWORD:}
+    # 与核心服务 Provider 同一分组，且刻意区别于 Spring Cloud 注册的 DEFAULT_GROUP，
+    # 避免 Dubbo 实例被 Gateway 的 HTTP 负载均衡选中。
+    group: ${DUBBO_REGISTRY_GROUP:DUBBO}
+    use-as-config-center: false
+    use-as-metadata-center: false
+  consumer:
+    # 启动时不强制要求 Provider 在线；运行期缺失按 503 失败关闭。
+    check: false
+    timeout: ${DUBBO_CONSUMER_TIMEOUT_MS:5000}
+    retries: 0
+
+app:
+  # 与核心服务、Gateway 同名的 Redis 会话存储（只读）。
+  redis:
+    host: ${REDIS_HOST:127.0.0.1}
+    port: ${REDIS_PORT:6379}
+    connection-pool-size: ${REDIS_POOL_SIZE:4}
+    retry-attempts: ${REDIS_RETRY_ATTEMPTS:1}
+    retry-interval-ms: ${REDIS_RETRY_INTERVAL_MS:200}
+    read-timeout-ms: ${ADMIN_REDIS_READ_TIMEOUT_MS:2000}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  level:
+    com.zzj.admin: INFO

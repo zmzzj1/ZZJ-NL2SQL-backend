@@ -73,6 +73,23 @@ spring:
             - Method=POST
           metadata:
             response-timeout: ${SSE_RESPONSE_TIMEOUT_MS:600000}
+        # ---- P13-M3A：独立管理服务的精确路由（必须排在 /api/** 兜底路由之前）----
+        # 只转发这两条只读管理查询；其余 /api/v1/admin/**（overview、model-usage、quotas、audits）
+        # 继续由核心业务服务提供，不受本路由影响。
+        - id: admin-users
+          uri: lb://zzj-admin
+          predicates:
+            - Path=/api/v1/admin/users
+            - Method=GET
+          metadata:
+            response-timeout: ${API_RESPONSE_TIMEOUT_MS:60000}
+        - id: admin-dashboard
+          uri: lb://zzj-admin
+          predicates:
+            - Path=/api/v1/admin/dashboard
+            - Method=GET
+          metadata:
+            response-timeout: ${API_RESPONSE_TIMEOUT_MS:60000}
         # ---- 业务 API 统一入口：保留完整 /api 前缀（Service Controller 直接映射 /api/v1/**）----
         - id: core-service-api
           uri: lb://zzj-service

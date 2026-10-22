@@ -19,8 +19,10 @@
   <description>ZZJ-NL2SQL P13-M1 Reactor：聚合核心业务服务与独立网关</description>
 
   <modules>
+    <module>zzj-common</module>
     <module>zzj-service</module>
     <module>zzj-gateway</module>
+    <module>zzj-admin</module>
   </modules>
 
   <properties>
@@ -30,6 +32,13 @@
     <!-- Boot 3.5.x -> Spring Cloud 2025.0.x；Spring Cloud Alibaba 对应 2025.0.0.0（内置 nacos-client 3.0.3）。 -->
     <spring-cloud.version>2025.0.3</spring-cloud.version>
     <spring-cloud-alibaba.version>2025.0.0.0</spring-cloud-alibaba.version>
+    <!--
+      P13-M3A：Dubbo 3.3.x 支持 Spring Boot 3.x / JDK 21。
+      dubbo-registry-nacos 默认带 nacos-client 2.5.1，与 Spring Cloud Alibaba 2025.0.0.0 的
+      nacos-client 3.0.3 同包不同版本；各模块统一排除前者，只保留 SCA 管理的 3.0.3，
+      避免同一 classpath 出现两份 nacos-client。
+    -->
+    <dubbo.version>3.3.6</dubbo.version>
   </properties>
 
   <!--
@@ -58,6 +67,24 @@
         <version>${spring-cloud-alibaba.version}</version>
         <type>pom</type>
         <scope>import</scope>
+      </dependency>
+
+      <!-- P13-M3A：管理查询 RPC。版本统一在此管理，避免子模块各自声明不同 Dubbo 版本。 -->
+      <dependency>
+        <groupId>org.apache.dubbo</groupId>
+        <artifactId>dubbo-spring-boot-starter</artifactId>
+        <version>${dubbo.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.dubbo</groupId>
+        <artifactId>dubbo-registry-nacos</artifactId>
+        <version>${dubbo.version}</version>
+        <exclusions>
+          <exclusion>
+            <groupId>com.alibaba.nacos</groupId>
+            <artifactId>nacos-client</artifactId>
+          </exclusion>
+        </exclusions>
       </dependency>
     </dependencies>
   </dependencyManagement>
