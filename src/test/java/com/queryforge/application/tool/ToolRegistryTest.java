@@ -7,7 +7,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.verify;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.queryforge.application.agent.AgentRunToolPolicy;
+import com.queryforge.application.tool.AgentRunToolPolicy;
 import com.queryforge.shared.error.ApiException;
 import com.queryforge.shared.error.ErrorCode;
 import java.util.List;

@@ -180,6 +180,29 @@ class AgentGraphStateServiceTest {
     }
 
     @Test
+    @DisplayName("AR-01-FB01 终态→终态的幂等终结请求保持原终态，不抛错（取消已完成运行不 500）")
+    void terminalToTerminalIsIdempotent() {
+        service.initialize(8L, 10L, 20L, 30L, 40L, 50L, "{}", 8000);
+        service.enter(8L, GraphNode.ROUTING, new CapturingSink(mapper).writer);
+        service.enter(8L, GraphNode.COMPLETED, new CapturingSink(mapper).writer);
+
+        AgentGraphState state = service.enter(8L, GraphNode.CANCELED, new CapturingSink(mapper).writer);
+
+        assertEquals(GraphNode.COMPLETED, state.node(), "已完成运行不能被迟到取消覆写为 CANCELED");
+        assertEquals(GraphNode.COMPLETED, service.load(8L).orElseThrow().node());
+    }
+
+    @Test
+    @DisplayName("AR-01-FB01 CREATED 状态即可被取消（运行尚未进入路由）")
+    void cancelFromCreatedIsAllowed() {
+        service.initialize(9L, 10L, null, 30L, null, null, "{}", 8000);
+
+        service.enter(9L, GraphNode.CANCELED, null);
+
+        assertEquals(GraphNode.CANCELED, service.load(9L).orElseThrow().node());
+    }
+
+    @Test
     @DisplayName("无检查点时 load 返回空（恢复安全失败，不冒充成功 P1130）")
     void loadReturnsEmptyWhenAbsent() {
         assertTrue(service.load(999L).isEmpty());

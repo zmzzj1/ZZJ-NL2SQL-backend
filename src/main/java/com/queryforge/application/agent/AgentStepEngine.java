@@ -273,6 +273,10 @@ public class AgentStepEngine {
         }
         repository.setStepSql(step.id(), validated, step.sqlVersion() + 1, attempt);
         repository.updateRunStatus(run.id(), RunStatus.WAITING_APPROVAL, null, null, null);
+        // AR-01-FB01：修复后必须回到 WAITING_SQL_APPROVAL，否则 Graph 停留在 SQL_EXECUTION，
+        // 与 RunStatus=WAITING_APPROVAL 不一致，刷新详情也无法恢复待审批轨迹。
+        graphStateService.enter(run.id(), GraphNode.WAITING_SQL_APPROVAL, writer);
+        graphStateService.markWaitingApproval(run.id(), GraphNode.WAITING_SQL_APPROVAL, writer);
         writer.event("step.sql_ready", new AgentStreamEvents.StepSqlReady(
                 step.id(), validated, step.sqlVersion() + 1));
         writer.event("approval.required", new AgentStreamEvents.ApprovalRequired(

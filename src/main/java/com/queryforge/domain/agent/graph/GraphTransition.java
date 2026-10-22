@@ -14,7 +14,8 @@ public final class GraphTransition {
     private static final Map<GraphNode, Set<GraphNode>> EDGES = new HashMap<>();
 
     static {
-        EDGES.put(GraphNode.CREATED, EnumSet.of(GraphNode.ROUTING));
+        // AR-01-FB01：运行创建后尚未进入 ROUTING 即被取消（SSE 未开始/客户端立刻断开）。
+        EDGES.put(GraphNode.CREATED, EnumSet.of(GraphNode.ROUTING, GraphNode.CANCELED));
         EDGES.put(GraphNode.ROUTING, EnumSet.of(
                 GraphNode.PLANNING, GraphNode.KNOWLEDGE, GraphNode.WAITING_CLARIFICATION,
                 GraphNode.COMPLETED, GraphNode.FAILED));
@@ -29,9 +30,11 @@ public final class GraphTransition {
         EDGES.put(GraphNode.SQL_GENERATION, EnumSet.of(GraphNode.WAITING_SQL_APPROVAL, GraphNode.FAILED));
         EDGES.put(GraphNode.WAITING_SQL_APPROVAL, EnumSet.of(
                 GraphNode.SQL_EXECUTION, GraphNode.CANCELED, GraphNode.FAILED));
+        // AR-01-FB01：SQL 修复后回到待审批（不是跳过审批，而是换发新版本重新确认）。
         EDGES.put(GraphNode.SQL_EXECUTION, EnumSet.of(
                 GraphNode.RUNNING, GraphNode.REPORT_GENERATION, GraphNode.CODE_ANALYSIS,
-                GraphNode.TOOL_INVOCATION, GraphNode.COMPLETED, GraphNode.FAILED));
+                GraphNode.TOOL_INVOCATION, GraphNode.WAITING_SQL_APPROVAL,
+                GraphNode.COMPLETED, GraphNode.FAILED));
         EDGES.put(GraphNode.TOOL_INVOCATION, EnumSet.of(
                 GraphNode.RUNNING, GraphNode.REPORT_GENERATION, GraphNode.CODE_ANALYSIS,
                 GraphNode.COMPLETED, GraphNode.FAILED));

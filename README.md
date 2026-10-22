@@ -23,7 +23,7 @@ Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL �
 - 查询历史 CSV 导出：重新校验资源权限与 SQL Guard、重新执行受限查询，并防止表格公式注入。
 - Agent Studio：草稿 CRUD、工具白名单、RAG/Memory 策略、Skill 绑定、发布不可变版本、回滚与审计。
 - Skill Registry：CRUD、不可变版本发布、模板白名单变量校验、运行时按相关性选择并注入。
-- 运行配置统一解析（`config/RuntimeConfigResolver`），配置真正影响 Manager/Agent Run/Tool Registry；Run 固定版本快照。
+- 运行配置由 `src/main/java/com/queryforge/application/agent/RuntimeConfigResolver.java` 统一解析，配置真正影响 Manager/Agent Run/Tool Registry；Run 固定版本快照。
 - 工作空间：OWNER/ADMIN/EDITOR/VIEWER 成员角色与资源授权；共享知识或 Agent 不自动授予数据源和 SQL 执行权限。
 - 混合 RAG：关键词、真实 Embedding 向量和 RRF 融合三种模式，命中结果保留来源、版本与分数。
 - 长期记忆：个人/空间作用域、类型、来源、置信度、去重、禁用与检索，并按用户及空间权限隔离。
@@ -204,5 +204,5 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn s
 
 ## 测试
 
-- `mvn verify`：330 个自动化用例（59 个测试类，0 failures/0 errors/0 skipped，2026-10-21 实跑），包含 Controller 切片、Service 单元测试，以及 P6–P12（分析器/报告/工具/工作流/Studio/Skill/Workspace/RAG/Memory/模型治理/定时调度/CSV 导出/统一状态图/角色门禁/分层上下文/Spring AI 传输层/路由治理/MyBatis-Plus/Sa-Token 会话/pgvector 检索/Redisson 四场景/Caffeine 缓存与连接池）测试。
+- `mvn verify`：350 个自动化用例（0 failures/0 errors/12 skipped，2026-10-22 实跑）；跳过项均为缺少对应外部测试环境时主动跳过的集成测试。覆盖 Controller 切片、Service 单元测试，以及 P6–P12（分析器/报告/工具/工作流/Studio/Skill/Workspace/RAG/Memory/模型治理/定时调度/CSV 导出/统一状态图/角色门禁/分层上下文/Spring AI 传输层/路由治理/MyBatis-Plus/Sa-Token 会话/pgvector 检索/Redisson 四场景/Caffeine 缓存与连接池）测试。
 - 真实环境用例（MySQL/PostgreSQL/Redis）在缺少对应服务时自动跳过并在报告输出原因，不冒充通过。

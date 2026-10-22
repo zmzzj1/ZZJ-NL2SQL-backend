@@ -67,6 +67,9 @@ public class AgentRunFailureHandler {
         } catch (IOException | RuntimeException ex) {
             log.debug("agent_fail_event_skipped runId={}", runId);
         }
+        // AR-01-FB01：事件写不出去时 DB 已终态，Graph 与短期状态必须同样收敛，
+        // 否则刷新详情会看到「Run=FAILED 但 Graph 仍在 SQL_EXECUTION / 令牌未释放」。
+        terminateQuietly(runId, GraphNode.FAILED);
     }
 
     /** 无步骤粒度的运行失败（规划期/路由期），清理短期状态。 */
@@ -91,25 +94,68 @@ public class AgentRunFailureHandler {
 
     /** 客户端断开：执行状态未知，仅当步骤仍可变更时置失败。 */
     public void markInterrupted(Long runId, Long stepId) {
+        boolean terminated = false;
         try {
             int failed = repository.failStep(stepId, "AGENT_CLIENT_CLOSED", "客户端断开，执行状态未知");
             if (failed > 0) {
                 repository.updateRunStatus(
                         runId, RunStatus.FAILED, null, "AGENT_CLIENT_CLOSED", "客户端断开，执行状态未知");
+                terminated = true;
             }
         } catch (RuntimeException ex) {
             log.warn("agent_interrupt_mark_failed runId={}", runId);
+        }
+        // AR-01-FB01：无论事件是否写出，已终结的运行都要收敛 Graph 与短期状态；
+        // 步骤未变更（例如已成功）时不强行置 FAILED，避免把成功轨迹改写成失败。
+        if (terminated) {
+            terminateQuietly(runId, GraphNode.FAILED);
+        } else {
+            clearShortLivedState(runId);
         }
     }
 
     /** 客户端断开（规划期）：尽量取消运行与待定步骤，失败仅记录。 */
     public void cancelRunQuietly(Long userId, Long runId) {
+        boolean canceled = false;
         try {
             if (repository.cancelActiveRun(runId, userId) > 0) {
                 repository.cancelPendingSteps(runId);
+                canceled = true;
             }
         } catch (RuntimeException ex) {
             log.warn("agent_cancel_failed runId={}", runId);
+        }
+        // AR-01-FB01：取消同样要让 Graph 落到 CANCELED 并释放短期状态。
+        if (canceled) {
+            terminateQuietly(runId, GraphNode.CANCELED);
+        } else {
+            clearShortLivedState(runId);
+        }
+    }
+
+    /**
+     * 终态一致性收敛：Graph 落终态 + 释放待审批令牌与计划快照。
+     * 三步各自独立吞异常，任一步失败不影响其余步骤，也不影响调用方主流程。
+     */
+    private void terminateQuietly(Long runId, GraphNode terminal) {
+        try {
+            graphStateService.enter(runId, terminal, null);
+        } catch (RuntimeException ex) {
+            log.warn("agent_graph_terminal_failed runId={} node={} message={}", runId, terminal, ex.getMessage());
+        }
+        clearShortLivedState(runId);
+    }
+
+    private void clearShortLivedState(Long runId) {
+        try {
+            approvalSessionStore.removeRun(runId);
+        } catch (RuntimeException ex) {
+            log.debug("agent_approval_clear_skipped runId={}", runId);
+        }
+        try {
+            planState.clear(runId);
+        } catch (RuntimeException ex) {
+            log.debug("agent_plan_clear_skipped runId={}", runId);
         }
     }
 

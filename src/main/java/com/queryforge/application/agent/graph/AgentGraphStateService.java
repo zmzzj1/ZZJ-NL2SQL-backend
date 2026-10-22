@@ -51,13 +51,24 @@ public class AgentGraphStateService {
     public AgentGraphState enter(long runId, GraphNode node, SseEventWriter writer) {
         AgentGraphState current = loadOrCreate(runId);
         GraphNode from = current.node();
-        if (from != node) {
-            if (from != GraphNode.CREATED && !from.terminal() && writer != null) {
-                emit(writer, new AgentStreamEvents.NodeCompleted(runId, from.name(), revision(current)));
-            }
-            current.transitionTo(node);
-            persist(current);
+        if (from == node) {
+            return current;
         }
+        if (from.terminal()) {
+            if (node.terminal()) {
+                // AR-01-FB01：幂等的取消/终结调用不能让已终态运行报 500；
+                // 终态→终态一律保持原终态（不覆写），业务事实来源仍是 AgentRun.status。
+                log.warn("agent_graph_terminal_ignored runId={} from={} to={}", runId, from, node);
+                return current;
+            }
+            // 终态不允许迟到回调把运行拉回执行态（P1104/P1119 硬门槛）。
+            throw new IllegalStateException("终态不可回退: " + from + " -> " + node);
+        }
+        if (from != GraphNode.CREATED && writer != null) {
+            emit(writer, new AgentStreamEvents.NodeCompleted(runId, from.name(), revision(current)));
+        }
+        current.transitionTo(node);
+        persist(current);
         if (writer != null) {
             emit(writer, new AgentStreamEvents.NodeStarted(runId, node.name(), revision(current)));
             if (node.terminal()) {

@@ -1,6 +1,5 @@
 package com.queryforge.application.tool;
 
-import com.queryforge.application.agent.AgentRunToolPolicy;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.queryforge.shared.error.ApiException;
 import com.queryforge.shared.error.ErrorCode;

@@ -17,6 +17,10 @@ class GraphStateTest {
         assertThat(GraphTransition.isAllowed(GraphNode.SQL_GENERATION, GraphNode.WAITING_SQL_APPROVAL)).isTrue();
         assertThat(GraphTransition.isAllowed(GraphNode.WAITING_SQL_APPROVAL, GraphNode.SQL_EXECUTION)).isTrue();
         assertThat(GraphTransition.isAllowed(GraphNode.WAITING_SQL_APPROVAL, GraphNode.CANCELED)).isTrue();
+        // AR-01-FB01：SQL 修复后换发新版本重新等待审批（不是跳过审批）
+        assertThat(GraphTransition.isAllowed(GraphNode.SQL_EXECUTION, GraphNode.WAITING_SQL_APPROVAL)).isTrue();
+        // AR-01-FB01：运行创建后尚未进入路由即被取消
+        assertThat(GraphTransition.isAllowed(GraphNode.CREATED, GraphNode.CANCELED)).isTrue();
 
         // 非法跳跃：SQL 生成不能直接到报告，不能跳过审批；规划不能跳过上下文构建直达执行
         assertThat(GraphTransition.isAllowed(GraphNode.SQL_GENERATION, GraphNode.REPORT_GENERATION)).isFalse();

@@ -1,4 +1,4 @@
-package com.queryforge.application.agent;
+package com.queryforge.application.tool;
 
 import com.queryforge.domain.agent.AgentRun;
 import com.queryforge.infrastructure.persistence.AgentRunRepository;
