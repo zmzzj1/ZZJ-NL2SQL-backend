@@ -104,4 +104,44 @@ class UntrustedIdentityHeaderFilterTest {
 
         assertThat(forwarded[0].getHeaders().keySet()).doesNotContainAnyElementsOf(names);
     }
+
+    @Test
+    @DisplayName("P13-M2：内部约定头前缀（X-Internal-* 等）一律清除")
+    void stripsInternalHeaderPrefixes() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("X-Internal-Token", "forged");
+        headers.set("x-internal-user", "1");
+        headers.set("X-Authenticated-User", "1");
+        headers.set("X-Trusted-Proxy", "true");
+
+        ServerWebExchange source = exchange(headers);
+        ServerHttpRequest[] forwarded = new ServerHttpRequest[1];
+        filter.filter(source, ex -> {
+            forwarded[0] = ex.getRequest();
+            return Mono.empty();
+        }).block();
+
+        assertThat(forwarded[0].getHeaders().keySet()).doesNotContain(
+                "X-Internal-Token", "x-internal-user", "X-Authenticated-User", "X-Trusted-Proxy");
+    }
+
+    @Test
+    @DisplayName("正常链路头（Cookie/CSRF/Trace）不受清洗影响")
+    void keepsLegitHeaders() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("Cookie", "satoken=abc; XSRF-TOKEN=def");
+        headers.set("X-XSRF-TOKEN", "def");
+        headers.set("X-Request-Id", "rid-1");
+
+        ServerWebExchange source = exchange(headers);
+        ServerHttpRequest[] forwarded = new ServerHttpRequest[1];
+        filter.filter(source, ex -> {
+            forwarded[0] = ex.getRequest();
+            return Mono.empty();
+        }).block();
+
+        assertThat(forwarded[0].getHeaders().getFirst("Cookie")).isEqualTo("satoken=abc; XSRF-TOKEN=def");
+        assertThat(forwarded[0].getHeaders().getFirst("X-XSRF-TOKEN")).isEqualTo("def");
+        assertThat(forwarded[0].getHeaders().getFirst("X-Request-Id")).isEqualTo("rid-1");
+    }
 }

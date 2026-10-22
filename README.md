@@ -119,6 +119,20 @@ P13-M1 起本目录是 Maven 聚合父工程（`packaging=pom`），含两个可
 
 前端 `/api` 仍然指向 8080（Vite 代理不变），因此页面代码无需改动；8080 现在是网关而不是业务进程。
 
+### 入口认证（P13-M2）
+
+网关对 `/api/**` **默认要求登录**，只放行经核实的精确匿名端点；其余请求用核心服务已建立的
+Sa-Token/Redis 会话判定：
+
+- 匿名白名单（精确 Method + Path）：`GET /api/health`、`POST /api/v1/auth/register`、
+  `POST /api/v1/auth/login`、`GET /api/v1/auth/csrf`。`logout` 与 `me` 不在其中。
+- 未登录 → `401 {"code":"UNAUTHENTICATED",...}`；会话存储不可用 → `503 {"code":"SERVICE_UNAVAILABLE",...}`
+  （失败关闭，不静默放行）。响应体形状与核心服务一致，前端无需改动。
+- 网关只判断"能否继续"，**不签发身份、不构造可信身份头、不做资源授权**；连接/Workspace/管理员/
+  SQL 审批/工具权限仍由 `zzj-service` 独立判断。
+- 客户端自填的 `X-User-Id`、`X-Role`、`X-Workspace*`、`X-Internal*` 等头在网关边界即被移除。
+- 网关会话校验只读 Redis（不写、不续期），且连接惰性：Redis 晚于网关启动不会让网关起不来。
+
 ```powershell
 # 确保 JAVA_HOME 指向本机安装的 JDK 21
 mvn verify            # 在 backend/ 下构建整个 Reactor
@@ -226,5 +240,5 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn s
 
 ## 测试
 
-- `mvn verify`：Reactor 共 355 个自动化用例（`zzj-service` 350 个、`zzj-gateway` 5 个；0 failures/0 errors/12 skipped，2026-10-22 实跑）；跳过项均为缺少对应外部测试环境时主动跳过的集成测试。覆盖 Controller 切片、Service 单元测试、网关身份头过滤，以及 P6–P12（分析器/报告/工具/工作流/Studio/Skill/Workspace/RAG/Memory/模型治理/定时调度/CSV 导出/统一状态图/角色门禁/分层上下文/Spring AI 传输层/路由治理/MyBatis-Plus/Sa-Token 会话/pgvector 检索/Redisson 四场景/Caffeine 缓存与连接池）测试。
+- `mvn verify`：Reactor 共 384 个自动化用例（`zzj-service` 350 个、`zzj-gateway` 34 个；0 failures/0 errors/12 skipped，2026-10-22 实跑）；跳过项均为缺少对应外部测试环境时主动跳过的集成测试。覆盖 Controller 切片、Service 单元测试，网关匿名策略/入口认证/身份头清洗/会话兼容（真实 Redis），以及 P6–P12（分析器/报告/工具/工作流/Studio/Skill/Workspace/RAG/Memory/模型治理/定时调度/CSV 导出/统一状态图/角色门禁/分层上下文/Spring AI 传输层/路由治理/MyBatis-Plus/Sa-Token 会话/pgvector 检索/Redisson 四场景/Caffeine 缓存与连接池）测试。
 - 真实环境用例（MySQL/PostgreSQL/Redis）在缺少对应服务时自动跳过并在报告输出原因，不冒充通过。

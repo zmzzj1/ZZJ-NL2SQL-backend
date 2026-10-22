@@ -15,7 +15,8 @@ set -euo pipefail
 BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JAVA_HOME_LOCAL="${JAVA_HOME_LOCAL:-D:/dev/tools/jdk-21.0.12.1+1}"
 # Nacos Server 3.x（解压在开发机目录，不进仓库）。可用 NACOS_HOME 覆盖。
-NACOS_HOME="${NACOS_HOME:-D:/dev/tools/nacos-server-3.0.3/nacos}"
+# 注意：3.0.3 在本机 JDK 21 上内嵌 Derby 无法启动，实测可用版本为 3.2.4（客户端仍为 SCA 锁定的 3.0.3）。
+NACOS_HOME="${NACOS_HOME:-D:/dev/tools/nacos-server-3.2.4/nacos}"
 
 start_nacos() {
   # 注意：本机会话里存在被污染的 SERVER__PORT 环境变量，会让 Nacos 控制台上下文绑错端口，启动前必须清除。

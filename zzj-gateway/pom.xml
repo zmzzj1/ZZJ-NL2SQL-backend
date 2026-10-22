@@ -40,6 +40,15 @@
       <artifactId>spring-boot-starter-actuator</artifactId>
     </dependency>
 
+    <!-- P13-M2：只读复用核心服务的 Sa-Token/Redis 会话（同版本 Redisson，响应式 API）。
+         不用 redisson-spring-boot-starter：它会拖入 spring-data-redis 与自动配置，
+         违反"网关依赖树不含业务栈"的 M1 约定；也不用 sa-token 运行时，避免网关自行签发/解释身份。 -->
+    <dependency>
+      <groupId>org.redisson</groupId>
+      <artifactId>redisson</artifactId>
+      <version>4.6.1</version>
+    </dependency>
+
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>

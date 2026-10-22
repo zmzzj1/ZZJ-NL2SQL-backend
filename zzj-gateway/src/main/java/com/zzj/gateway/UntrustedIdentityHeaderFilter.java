@@ -1,6 +1,7 @@
 package com.zzj.gateway;
 
 import java.util.List;
+import java.util.Locale;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.core.Ordered;
@@ -35,16 +36,25 @@ public class UntrustedIdentityHeaderFilter implements GlobalFilter, Ordered {
             "x-admin",
             "x-authorities");
 
+    /** P13-M2：内部约定头前缀，任何以它们开头的头都不允许来自外部（避免被当作内部凭据）。 */
+    private static final List<String> STRIPPED_PREFIXES = List.of("x-internal-", "x-authenticated-", "x-trusted-");
+
+    private static boolean isForged(String lowerName) {
+        return STRIPPED_HEADERS.contains(lowerName)
+                || STRIPPED_PREFIXES.stream().anyMatch(lowerName::startsWith);
+    }
+
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
         ServerHttpRequest request = exchange.getRequest();
-        boolean hasForged = request.getHeaders().keySet().stream()
-                .anyMatch(name -> STRIPPED_HEADERS.contains(name.toLowerCase()));
-        if (!hasForged) {
+        List<String> forged = request.getHeaders().keySet().stream()
+                .filter(name -> isForged(name.toLowerCase(Locale.ROOT)))
+                .toList();
+        if (forged.isEmpty()) {
             return chain.filter(exchange);
         }
         ServerHttpRequest cleaned = request.mutate()
-                .headers(headers -> STRIPPED_HEADERS.forEach(headers::remove))
+                .headers(headers -> forged.forEach(headers::remove))
                 .build();
         return chain.filter(exchange.mutate().request(cleaned).build());
     }
