@@ -1,6 +1,6 @@
 # QueryForge 后端（真实用户与多数据源）
 
-Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性；P10 新增工作流定时调度与安全 CSV 导出；P11 新增统一 Agent 执行内核；P13 将公开入口拆为 Gateway，新增通过 Dubbo 查询核心业务数据的独立 Admin 服务，并把 Docker Python 隔离执行下沉为可复用 Sandbox 模块。
+Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性；P10 新增工作流定时调度与安全 CSV 导出；P11 新增统一 Agent 执行内核；P13 将公开入口拆为 Gateway，新增通过 Dubbo 查询核心业务数据的独立 Admin 服务，并把 Docker Python 隔离执行下沉为可复用 Sandbox 模块；P14-A 完成自适应 Manager 路由、分层上下文真实入模和用户显式工具调用闭环。
 
 ## 环境要求
 
@@ -13,10 +13,10 @@ Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL �
 ## 主要能力
 
 - 会话、消息和查询历史持久化，资源按登录用户隔离。
-- Agent 多步规划、逐步确认执行、限次 SQL 修复、取消与运行恢复。
-- Manager 结构化路由、多角色轨迹和 LLM 调用次数限制。
+- Agent 多步规划、逐步确认执行、限次 SQL 修复、取消与运行恢复；闲聊、澄清、知识解释、简单查询、复杂分析和安全降级均落到真实运行状态。
+- Manager 使用当前问题、授权 Schema/知识摘要和压缩会话历史进行结构化路由；模型分类不可用时安全降级到 Planner，并保留多角色轨迹和 LLM 调用次数限制。
 - 业务知识 CRUD、按连接鉴权检索和会话记忆摘要。
-- 受控工具注册表（只读工具 + 审计）、真实 MCP stdio 客户端（预配置白名单服务）。
+- 受控工具注册表（只读工具 + 审计）、真实 MCP stdio 客户端（预配置白名单服务）；用户可显式选择一次工具调用，服务端执行参数边界校验、角色能力与 Agent 白名单双层授权、幂等领取和递归脱敏摘要。
 - 隔离 Python 数据分析：`zzj-sandbox` 以普通 JAR 提供一次性 Docker 容器、非 root、禁网、只读根、资源/时间/输出限制和强制清理；运行时不可用时拒绝回退宿主机。另含内置确定性分析器。
 - 结构化图表（table/bar/line/pie）与净化 HTML 报告（CSP + 沙箱预览）。
 - 可视化工作流 DAG（校验、版本化、串行执行、SQL 审批暂停/恢复、SSE）。
@@ -143,15 +143,16 @@ Sa-Token/Redis 会话判定：
 # 确保 JAVA_HOME 指向本机安装的 JDK 21
 mvn verify            # 在 backend/ 下构建整个 Reactor
 
-# 逐个启动（统一以 backend/ 为工作目录，保证 ./config 与 tools/ 相对路径语义不变）
+# 逐个启动（统一以 backend/ 为工作目录；先确认对应端口没有健康实例）
 # 1) Nacos（standalone）
+bash scripts/start-local.sh nacos
 # 2) zzj-service
 $env:PG_PASSWORD='<postgres-password>'
-java -jar zzj-service/target/zzj-service.jar --server.port=8081
+bash scripts/start-local.sh service
 # 3) zzj-gateway
-java -jar zzj-gateway/target/zzj-gateway.jar --server.port=8080
+bash scripts/start-local.sh gateway
 # 4) zzj-admin（需要 Redis、Nacos 与运行中的 zzj-service）
-java -jar zzj-admin/target/zzj-admin.jar --server.port=8083
+mvn -pl zzj-admin spring-boot:run -Dspring-boot.run.arguments=--server.port=8083
 ```
 
 也可使用 `scripts/start-local.sh {nacos|service|gateway}`。
@@ -255,6 +256,7 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn s
 
 ## 测试
 
+- P14-A 全量验证：`mvn verify` 共 481 个自动化用例（`zzj-common` 6 个、`zzj-sandbox` 8 个、`zzj-service` 415 个、`zzj-gateway` 38 个、`zzj-admin` 14 个；0 failures/0 errors/17 skipped，2026-10-23 实跑）。新增覆盖 Manager 安全降级、闲聊/澄清状态、显式工具调用、双层授权、参数边界、递归输出脱敏和分层上下文真实注入。
 - P13-M4 全量验证：`mvn verify` 共 432 个自动化用例（`zzj-common` 6 个、`zzj-sandbox` 8 个、`zzj-service` 366 个、`zzj-gateway` 38 个、`zzj-admin` 14 个；0 failures/0 errors/17 skipped，2026-10-22 实跑）。其中 5 个真实 Docker 安全/资源探针因当前 Docker 守护进程不可访问而如实跳过，其余跳过项为缺少对应外部测试条件的集成测试。
 - P13-M2 全量基线：`mvn verify` 共 384 个自动化用例（`zzj-service` 350 个、`zzj-gateway` 34 个；0 failures/0 errors/12 skipped，2026-10-22 实跑）；跳过项均为缺少对应外部测试环境时主动跳过的集成测试。
 - P13-M3A 定向验证：Admin 契约、Provider、Gateway 路由、共享会话、Dubbo Consumer 和 Controller 共 32 个用例通过；可用 `mvn -pl zzj-admin -am -Dtest=AdminContractTest,AdminSessionServiceTest,AdminQueryRpcClientTest,AdminQueryControllerTest -Dsurefire.failIfNoSpecifiedTests=false test` 快速复测 Admin 侧。

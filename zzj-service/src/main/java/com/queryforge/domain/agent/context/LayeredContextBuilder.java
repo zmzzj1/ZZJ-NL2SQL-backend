@@ -129,7 +129,10 @@ public final class LayeredContextBuilder {
         // 授权边界事实前置到系统上下文，确保模型始终可见。
         for (ContextSegment segment : retained) {
             if (segment.isAuthorization()) {
-                sb.append("\n[授权边界] ").append(segment.text().trim());
+                if (!sb.isEmpty()) {
+                    sb.append('\n');
+                }
+                sb.append("[授权边界] ").append(segment.text().trim());
             }
         }
         return sb.toString();

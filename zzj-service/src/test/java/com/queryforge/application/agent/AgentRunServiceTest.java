@@ -121,6 +121,15 @@ class AgentRunServiceTest {
     @Mock
     private ApprovalSessionStore approvalSessionStore;
 
+    @Mock
+    private com.queryforge.application.agent.roles.ToolAssistantAgent toolAssistant;
+
+    @Mock
+    private com.queryforge.application.tool.AgentRunToolPolicy toolPolicy;
+
+    @Mock
+    private com.queryforge.application.tool.ToolOutputSanitizer toolOutputSanitizer;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private AgentStepEngine engine;
     private AgentRunService service;
@@ -140,11 +149,12 @@ class AgentRunServiceTest {
                 repository, conversationService, connectionService, planner, sqlAssistant,
                 executionService, guard, properties, managerRouter, graphStateService,
                 roleAssigner, approvalSessionStore, contextAssembler, failureHandler,
-                planState, roleRecorder, llmLimiter);
+                planState, roleRecorder, llmLimiter, toolAssistant, toolPolicy, toolOutputSanitizer);
         service = new AgentRunService(
                 repository, conversationService, connectionService, sqlAssistant, objectMapper,
                 knowledgeService, configResolver, graphStateService, approvalSessionStore,
-                engine, contextAssembler, failureHandler, planState, roleRecorder, llmLimiter);
+                engine, contextAssembler, failureHandler, planState, roleRecorder, llmLimiter,
+                new com.queryforge.application.agent.ToolInvocationRequestGuard());
         org.mockito.Mockito.lenient().when(roleAssigner.assign(anyString())).thenReturn(AgentRole.DATA_ANALYST);
     }
 
@@ -161,7 +171,7 @@ class AgentRunServiceTest {
                 .thenReturn(RUN_ID);
 
         PreparedRun prepared = service.prepareStart(
-                USER_ID, new CreateAgentRunRequest(CONVERSATION_ID, CONNECTION_ID, QUESTION, null, null, null, null));
+                USER_ID, new CreateAgentRunRequest(CONVERSATION_ID, CONNECTION_ID, QUESTION, null, null, null, null, null));
 
         assertThat(prepared.runId()).isEqualTo(RUN_ID);
         assertThat(prepared.database()).isEqualTo("sql_demo_a");
@@ -173,7 +183,9 @@ class AgentRunServiceTest {
     @DisplayName("规划成功后展示计划并生成第一步 SQL，等待用户确认")
     void startRun_shouldEmitPlanAndFirstApproval() throws Exception {
         stubPlan(1);
-        when(sqlAssistant.generateSql(QUESTION, SCHEMA, "", "", "", "")).thenReturn(SQL);
+        when(sqlAssistant.generateSql(
+                eq(QUESTION), eq(SCHEMA), anyString(), anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(SQL);
         when(guard.validate(SQL, "sql_demo_a")).thenReturn(SQL);
 
         String output = start(prepared());
@@ -197,9 +209,9 @@ class AgentRunServiceTest {
         when(connectionService.schemaContext(USER_ID, CONNECTION_ID)).thenReturn(SCHEMA);
         when(conversationService.recentCompletedMessages(CONVERSATION_ID, 6)).thenReturn(List.of());
         when(conversationService.memorySummary(CONVERSATION_ID)).thenReturn(null);
-        when(managerRouter.route(QUESTION, null))
+        when(managerRouter.route(any(ManagerRouter.RoutingContext.class)))
                 .thenReturn(new ManagerRouter.RouteDecision(AgentRoute.COMPLEX, "需要多步分析"));
-        when(planner.plan(QUESTION, SCHEMA))
+        when(planner.plan(eq(QUESTION), eq(SCHEMA), anyString()))
                 .thenReturn(new AgentPlan(false, "Schema 中没有退款表", List.of()));
 
         String output = start(prepared());
@@ -212,7 +224,9 @@ class AgentRunServiceTest {
     @DisplayName("生成期 SQL Guard 拒绝时步骤与运行都失败")
     void startRun_shouldFailWhenGuardRejects() throws Exception {
         stubPlan(1);
-        when(sqlAssistant.generateSql(QUESTION, SCHEMA, "", "", "", "")).thenReturn(SQL);
+        when(sqlAssistant.generateSql(
+                eq(QUESTION), eq(SCHEMA), anyString(), anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(SQL);
         when(guard.validate(SQL, "sql_demo_a")).thenThrow(
                 new ApiException(ErrorCode.SQL_NOT_ALLOWED, HttpStatus.BAD_REQUEST, "只允许只读 SELECT"));
 
@@ -410,14 +424,14 @@ class AgentRunServiceTest {
         when(connectionService.schemaContext(USER_ID, CONNECTION_ID)).thenReturn(SCHEMA);
         when(conversationService.recentCompletedMessages(CONVERSATION_ID, 6)).thenReturn(List.of());
         when(conversationService.memorySummary(CONVERSATION_ID)).thenReturn(null);
-        when(managerRouter.route(QUESTION, null))
+        when(managerRouter.route(any(ManagerRouter.RoutingContext.class)))
                 .thenReturn(new ManagerRouter.RouteDecision(AgentRoute.COMPLEX, "需要多步分析"));
         when(knowledgeService.hits(USER_ID, CONNECTION_ID, QUESTION)).thenReturn(List.of());
         when(knowledgeService.knowledgeContext(USER_ID, CONNECTION_ID, QUESTION, 2000)).thenReturn("");
         List<AgentPlan.Step> planSteps = java.util.stream.IntStream.rangeClosed(1, stepCount)
                 .mapToObj(index -> new AgentPlan.Step(QUESTION))
                 .toList();
-        when(planner.plan(QUESTION, SCHEMA)).thenReturn(new AgentPlan(true, "", planSteps));
+        when(planner.plan(eq(QUESTION), eq(SCHEMA), anyString())).thenReturn(new AgentPlan(true, "", planSteps));
         for (int index = 1; index <= stepCount; index++) {
             when(repository.insertStep(RUN_ID, index, QUESTION, index == 1 ? null : index - 1))
                     .thenReturn(STEP_ID + index - 1);

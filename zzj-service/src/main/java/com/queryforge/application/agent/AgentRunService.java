@@ -14,6 +14,7 @@ import com.queryforge.domain.agent.AgentStepResponse;
 import com.queryforge.domain.agent.AgentStreamEvents;
 import com.queryforge.domain.agent.ApproveAgentStepRequest;
 import com.queryforge.domain.agent.CreateAgentRunRequest;
+import com.queryforge.domain.agent.CreateAgentRunRequest.ToolInvocationRequest;
 import com.queryforge.domain.agent.RunStatus;
 import com.queryforge.domain.agent.StepStatus;
 import com.queryforge.domain.agent.graph.GraphNode;
@@ -47,6 +48,9 @@ import com.queryforge.domain.agent.ResolvedAgentConfig;
  *
  * <p>SQL 的审批、Guard、只读执行与幂等约束保持不变：未确认的 SQL 不会执行，
  * 确认请求按 runId + stepId + sqlVersion 幂等（P4 契约 4.1）。
+ *
+ * <p>P14-A：Manager 自适应路由（CHITCHAT/CLARIFY/SIMPLE/COMPLEX/KNOWLEDGE/MEDIUM）、
+ * 闲聊与澄清真实业务状态、用户显式工具快捷路径、分层上下文真实入模。
  */
 @Service
 public class AgentRunService {
@@ -54,9 +58,10 @@ public class AgentRunService {
     private static final Logger log = LoggerFactory.getLogger(AgentRunService.class);
     private static final int LIST_LIMIT = 20;
     private static final int RECENT_TURNS = 6;
-
-    private static final String CHITCHAT_REPLY =
-            "你好！我是 SQL 分析助手。你可以描述一个业务问题，我会基于真实 Schema 生成只读 SQL 并等待你确认。";
+    /** 授权 Schema 摘要进入分类请求的最大字符数（避免无限文本）。 */
+    private static final int SCHEMA_SUMMARY_CHARS = 4000;
+    /** 授权知识概要进入分类请求的最大字符数。 */
+    private static final int EVIDENCE_SUMMARY_CHARS = 2000;
 
     private final AgentRunRepository repository;
     private final ConversationService conversationService;
@@ -73,6 +78,7 @@ public class AgentRunService {
     private final AgentPlanStateService planState;
     private final AgentRoleRecorder roleRecorder;
     private final AgentLlmCallLimiter llmLimiter;
+    private final ToolInvocationRequestGuard toolInvocationGuard;
 
     public AgentRunService(
             AgentRunRepository repository,
@@ -89,7 +95,8 @@ public class AgentRunService {
             AgentRunFailureHandler failureHandler,
             AgentPlanStateService planState,
             AgentRoleRecorder roleRecorder,
-            AgentLlmCallLimiter llmLimiter) {
+            AgentLlmCallLimiter llmLimiter,
+            ToolInvocationRequestGuard toolInvocationGuard) {
         this.repository = repository;
         this.conversationService = conversationService;
         this.connectionService = connectionService;
@@ -105,6 +112,7 @@ public class AgentRunService {
         this.planState = planState;
         this.roleRecorder = roleRecorder;
         this.llmLimiter = llmLimiter;
+        this.toolInvocationGuard = toolInvocationGuard;
     }
 
     public PreparedRun prepareStart(Long userId, CreateAgentRunRequest request) {
@@ -113,6 +121,8 @@ public class AgentRunService {
         ConnectionService.ConnectionSummary connection =
                 connectionService.summary(userId, request.connectionId());
         String question = request.userInput().trim();
+        // P14-A：显式工具请求先在服务端做边界校验（工具名/参数深度/体积/非对象参数）。
+        ToolInvocationRequest toolInvocation = toolInvocationGuard.validate(request.toolInvocation());
 
         ResolvedAgentConfig config = resolveConfig(userId, request);
         Long runId = repository.insertRun(
@@ -125,10 +135,10 @@ public class AgentRunService {
         conversationService.appendMessage(conversationId, MessageRole.USER, question, MessageStatus.COMPLETED);
         return new PreparedRun(
                 runId, userId, conversationId, connection.id(), connection.database(), question, config,
-                request.workspaceId());
+                request.workspaceId(), toolInvocation);
     }
 
-    /** 解析运行配置：显式指定版本 > 草稿（测试）> Agent 当前发布版 > 默认。 */
+    /** 解析运行配置：显式指定版本 > 草稿（测试） > Agent 当前发布版 > 默认。 */
     private ResolvedAgentConfig resolveConfig(Long userId, CreateAgentRunRequest request) {
         if (request.agentVersionId() != null) {
             return configResolver.resolvePublishedByVersion(userId, request.agentVersionId());
@@ -169,24 +179,38 @@ public class AgentRunService {
             String memory = conversationService.memorySummary(run.conversationId());
             writer.event("context.prepared", new AgentStreamEvents.ContextPrepared(
                     run.runId(), recent.size(), memory != null && !memory.isBlank()));
-            contextAssembler.emitContextCompacted(run.runId(), writer, recent, run.question());
 
             graphStateService.enter(run.runId(), GraphNode.ROUTING, writer);
-            ManagerRouter.RouteDecision decision = engine.route(run, memory, writer);
+
+            // P14-A：用户显式选择工具时是 Manager 的最高优先级输入分支：
+            // 跳过分类模型与 Planner，直接走单次受控工具执行链。
+            if (run.hasToolInvocation()) {
+                repository.updateRunRoute(run.runId(), "TOOL_INVOCATION", null, null);
+                writer.event("agent.routed", new AgentStreamEvents.AgentRouted(
+                        run.runId(), "TOOL_INVOCATION", "用户显式选择工具"));
+                engine.executeToolInvocation(run, writer);
+                return;
+            }
+
+            String evidenceSummary = evidenceSummary(run);
+            EffectiveRunContext context = contextAssembler.buildRunContext(
+                    run, writer, recent, memory, truncate(schema, SCHEMA_SUMMARY_CHARS),
+                    evidenceSummary, false);
+            contextAssembler.emitContextCompacted(run.runId(), writer, context);
+
+            ManagerRouter.RoutingContext routingContext = new ManagerRouter.RoutingContext(
+                    run.question(),
+                    truncate(schema, SCHEMA_SUMMARY_CHARS),
+                    truncate(evidenceSummary, EVIDENCE_SUMMARY_CHARS),
+                    context.historyForClassifier());
+            ManagerRouter.RouteDecision decision = engine.route(run, routingContext, writer);
             repository.updateRunRoute(run.runId(), decision.route().name(), null, null);
             writer.event("agent.routed", new AgentStreamEvents.AgentRouted(
                     run.runId(), decision.route().name(), decision.reason()));
             roleRecorder.record(run, "MANAGER");
 
             switch (decision.route()) {
-                case CHITCHAT -> {
-                    repository.updateRunStatus(run.runId(), RunStatus.COMPLETED, CHITCHAT_REPLY, null, null);
-                    conversationService.appendMessage(
-                            run.conversationId(), MessageRole.ASSISTANT, CHITCHAT_REPLY, MessageStatus.COMPLETED);
-                    graphStateService.enter(run.runId(), GraphNode.COMPLETED, writer);
-                    writer.event("run.completed", new AgentStreamEvents.RunCompleted(run.runId(), CHITCHAT_REPLY));
-                    engine.updateSessionMemory(run, CHITCHAT_REPLY);
-                }
+                case CHITCHAT -> engine.answerChitchat(run, writer, context);
                 case CLARIFY -> {
                     String message = decision.reason().isBlank()
                             ? "请补充数据源或业务口径后再提问。" : decision.reason();
@@ -196,7 +220,7 @@ public class AgentRunService {
                 }
                 case KNOWLEDGE -> {
                     graphStateService.enter(run.runId(), GraphNode.KNOWLEDGE, writer);
-                    answerFromKnowledge(run, writer);
+                    answerFromKnowledge(run, writer, context);
                     graphStateService.enter(run.runId(), GraphNode.COMPLETED, writer);
                 }
                 case SIMPLE -> {
@@ -205,16 +229,22 @@ public class AgentRunService {
                     graphStateService.enter(run.runId(), GraphNode.RUNNING, writer);
                     AgentPlan plan = new AgentPlan(
                             true, "", List.of(new AgentPlan.Step(truncate(run.question(), 300))));
-                    engine.executePlan(run, schema, plan, writer);
+                    engine.executePlan(run, schema, plan, writer, context);
                 }
-                case COMPLEX -> {
+                case COMPLEX, MEDIUM -> {
+                    // MEDIUM 是分类不可用时的安全降级：继续走 Planner，不静默放行未验证 SQL。
                     graphStateService.enter(run.runId(), GraphNode.PLANNING, writer);
-                    AgentPlan plan = engine.plan(run, schema, writer);
+                    AgentPlan plan = engine.plan(run, schema, writer, context);
                     if (plan != null) {
                         graphStateService.enter(run.runId(), GraphNode.CONTEXT_BUILDING, writer);
                         graphStateService.enter(run.runId(), GraphNode.RUNNING, writer);
-                        engine.executePlan(run, schema, plan, writer);
+                        engine.executePlan(run, schema, plan, writer, context);
                     }
+                }
+                case TOOL_INVOCATION -> {
+                    // 模型不得返回该值；显式工具分支已在上面处理，此处只做安全拒绝。
+                    failureHandler.failRunWithEvent(run.runId(), "AGENT_PLAN_INVALID",
+                            "路由结果不合法", writer);
                 }
             }
         } catch (IOException ex) {
@@ -229,13 +259,16 @@ public class AgentRunService {
     }
 
     /** KNOWLEDGE 路由：直接以知识库证据作答，不生成 SQL、不进入审批。 */
-    private void answerFromKnowledge(PreparedRun run, SseEventWriter writer) throws IOException {
+    private void answerFromKnowledge(PreparedRun run, SseEventWriter writer, EffectiveRunContext context)
+            throws IOException {
         List<KnowledgeSearchResponse.Hit> hits =
                 knowledgeService.hits(run.userId(), run.connectionId(), run.question());
         contextAssembler.emitKnowledge(run.runId(), writer, hits);
-        String knowledge = knowledgeService.knowledgeContext(
-                run.userId(), run.connectionId(), run.question(),
-                AgentContextAssembler.DEFAULT_KNOWLEDGE_CONTEXT_CHARS);
+        String knowledge = context != null && !context.knowledge().isBlank()
+                ? context.knowledge()
+                : knowledgeService.knowledgeContext(
+                        run.userId(), run.connectionId(), run.question(),
+                        AgentContextAssembler.DEFAULT_KNOWLEDGE_CONTEXT_CHARS);
         String answer = llmLimiter.count(run.runId(), () -> sqlAssistant.knowledgeAnswer(run.question(), knowledge));
         roleRecorder.record(run, "KNOWLEDGE");
         repository.updateRunStatus(run.runId(), RunStatus.COMPLETED, answer, null, null);
@@ -243,6 +276,21 @@ public class AgentRunService {
                 run.conversationId(), MessageRole.ASSISTANT, answer, MessageStatus.COMPLETED);
         writer.event("run.completed", new AgentStreamEvents.RunCompleted(run.runId(), answer));
         engine.updateSessionMemory(run, answer);
+    }
+
+    /** 授权知识概要：仅使用当前 userId/connectionId/workspaceId 授权范围内的检索结果。 */
+    private String evidenceSummary(PreparedRun run) {
+        ResolvedAgentConfig config = run.config();
+        if (config != null && !config.ragEnabled()) {
+            return "";
+        }
+        try {
+            return contextAssembler.knowledgeContext(
+                    run, AgentContextAssembler.DEFAULT_KNOWLEDGE_CONTEXT_CHARS);
+        } catch (RuntimeException ex) {
+            log.debug("agent_evidence_summary_skipped runId={} message={}", run.runId(), ex.getMessage());
+            return "";
+        }
     }
 
     public PreparedApproval prepareApproval(Long userId, Long runId, Long stepId,
@@ -429,6 +477,9 @@ public class AgentRunService {
     }
 
     private static String truncate(String value, int maxChars) {
+        if (value == null) {
+            return "";
+        }
         return value.length() > maxChars ? value.substring(0, maxChars) : value;
     }
 }

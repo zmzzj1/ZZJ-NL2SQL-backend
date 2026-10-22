@@ -2,16 +2,22 @@ package com.queryforge.application.agent;
 
 import com.queryforge.application.agent.graph.AgentGraphStateService;
 import com.queryforge.application.agent.roles.RoleAssigner;
+import com.queryforge.application.agent.roles.ToolAssistantAgent;
 import com.queryforge.application.conversation.ConversationService;
 import com.queryforge.application.datasource.ConnectionService;
+import com.queryforge.application.tool.AgentRunToolPolicy;
+import com.queryforge.application.tool.ToolOutputSanitizer;
 import com.queryforge.domain.agent.AgentPlan;
 import com.queryforge.domain.agent.AgentProperties;
 import com.queryforge.domain.agent.AgentRun;
 import com.queryforge.domain.agent.AgentStep;
 import com.queryforge.domain.agent.AgentStreamEvents;
+import com.queryforge.domain.agent.CreateAgentRunRequest.ToolInvocationRequest;
 import com.queryforge.domain.agent.graph.GraphNode;
 import com.queryforge.domain.agent.RunStatus;
 import com.queryforge.domain.agent.StepStatus;
+import com.queryforge.domain.tool.ToolInvocation;
+import com.queryforge.domain.tool.ToolInvocationResult;
 import com.queryforge.infrastructure.persistence.AgentRunRepository;
 import com.queryforge.infrastructure.redis.ApprovalSessionStore;
 import com.queryforge.infrastructure.web.SseEventWriter;
@@ -36,18 +42,29 @@ import org.springframework.stereotype.Service;
 import com.queryforge.domain.agent.ResolvedAgentConfig;
 
 /**
- * Agent 执行核心：Manager 路由、Planner 规划、步骤推进（SQL 生成/审批/修复）、
- * 多步骤续跑与最终总结、会话记忆摘要。
+ * Agent 执行核心：Manager 路由、闲聊/澄清、显式工具快捷路径、Planner 规划、
+ * 步骤推进（SQL 生成/审批/修复）、多步骤续跑与最终总结、会话记忆摘要。
  *
  * <p>本类只负责“怎么执行”；运行生命周期编排、审批幂等裁决与对外契约在
  * {@link AgentRunService}。事实来源始终是 DB；短期状态（Redis）经由
  * {@link AgentPlanStateService} fail-soft 读写。
+ *
+ * <p>P14-A：所有需要模型的路径都消费 {@link AgentContextAssembler} 一次构造的
+ * {@link EffectiveRunContext}，不再忽略构造结果只另取零散字符串。
  */
 @Service
 public class AgentStepEngine {
 
     private static final Logger log = LoggerFactory.getLogger(AgentStepEngine.class);
     private static final int MAX_SUMMARY_CHARS = 500;
+    private static final int MAX_ERROR_MESSAGE_CHARS = 300;
+    private static final int TOOL_STEP_SEQUENCE = 1;
+    private static final int RECENT_TURNS = 6;
+    private static final String TOOL_ACTIVITY = "tool-1";
+    /** 模型返回空串时的简洁能力兜底（仅限空响应，不用于伪造失败）。 */
+    private static final String CHITCHAT_FALLBACK =
+            "我可以基于你已授权的数据源生成只读 SQL（需你确认后执行）、做多步分析与图表，"
+                    + "并解释授权知识库中的业务口径。直接描述你的问题即可。";
 
     private final AgentRunRepository repository;
     private final ConversationService conversationService;
@@ -66,6 +83,9 @@ public class AgentStepEngine {
     private final AgentPlanStateService planState;
     private final AgentRoleRecorder roleRecorder;
     private final AgentLlmCallLimiter llmLimiter;
+    private final ToolAssistantAgent toolAssistant;
+    private final AgentRunToolPolicy toolPolicy;
+    private final ToolOutputSanitizer toolOutputSanitizer;
 
     public AgentStepEngine(
             AgentRunRepository repository,
@@ -84,7 +104,10 @@ public class AgentStepEngine {
             AgentRunFailureHandler failureHandler,
             AgentPlanStateService planState,
             AgentRoleRecorder roleRecorder,
-            AgentLlmCallLimiter llmLimiter) {
+            AgentLlmCallLimiter llmLimiter,
+            ToolAssistantAgent toolAssistant,
+            AgentRunToolPolicy toolPolicy,
+            ToolOutputSanitizer toolOutputSanitizer) {
         this.repository = repository;
         this.conversationService = conversationService;
         this.connectionService = connectionService;
@@ -102,14 +125,18 @@ public class AgentStepEngine {
         this.planState = planState;
         this.roleRecorder = roleRecorder;
         this.llmLimiter = llmLimiter;
+        this.toolAssistant = toolAssistant;
+        this.toolPolicy = toolPolicy;
+        this.toolOutputSanitizer = toolOutputSanitizer;
     }
 
-    public ManagerRouter.RouteDecision route(PreparedRun run, String memory, SseEventWriter writer)
-            throws IOException {
+    /** Manager 分类：使用真实授权上下文；模型侧失败由 ManagerRouter 降级为 MEDIUM。 */
+    public ManagerRouter.RouteDecision route(PreparedRun run, ManagerRouter.RoutingContext routingContext,
+                                             SseEventWriter writer) throws IOException {
         writer.event("agent.started", new AgentStreamEvents.AgentStarted(run.runId(), "MANAGER", "route"));
         try {
             ManagerRouter.RouteDecision decision =
-                    llmLimiter.count(run.runId(), () -> managerRouter.route(run.question(), memory));
+                    llmLimiter.count(run.runId(), () -> managerRouter.route(routingContext));
             writer.event("agent.completed", new AgentStreamEvents.AgentCompleted(
                     run.runId(), "MANAGER", "route", "SUCCESS"));
             return decision;
@@ -120,10 +147,155 @@ public class AgentStepEngine {
         }
     }
 
-    public AgentPlan plan(PreparedRun run, String schema, SseEventWriter writer) throws IOException {
+    /**
+     * P14-A：闲聊真实应答。调用当前可用模型生成自然语言文本，持久化为 Run.summary
+     * 与会话 ASSISTANT 消息；模型失败/超时不伪造成功，进入 Run.FAILED。
+     */
+    public void answerChitchat(PreparedRun run, SseEventWriter writer, EffectiveRunContext context)
+            throws IOException {
+        writer.event("agent.started", new AgentStreamEvents.AgentStarted(run.runId(), "MANAGER", "chitchat"));
+        String answer;
+        try {
+            answer = llmLimiter.count(run.runId(), () -> sqlAssistant.chitchatAnswer(
+                    run.question(), context == null ? "" : context.historyForClassifier()));
+        } catch (RuntimeException ex) {
+            writer.event("agent.completed", new AgentStreamEvents.AgentCompleted(
+                    run.runId(), "MANAGER", "chitchat", "FAILED"));
+            ErrorCode code = ex instanceof ApiException api ? api.getErrorCode() : ErrorCode.LLM_UPSTREAM_ERROR;
+            failureHandler.failRunWithEvent(run.runId(), code.name(), "对话生成失败，请稍后重试", writer);
+            return;
+        }
+        writer.event("agent.completed", new AgentStreamEvents.AgentCompleted(
+                run.runId(), "MANAGER", "chitchat", "SUCCESS"));
+        roleRecorder.record(run, "MANAGER");
+        String reply = answer == null ? "" : answer.trim();
+        if (reply.isEmpty()) {
+            reply = CHITCHAT_FALLBACK;
+        }
+        // 图 ROUTING→COMPLETED（仅在真实成功回答后进入终态）。
+        graphStateService.enter(run.runId(), GraphNode.COMPLETED, writer);
+        repository.updateRunStatus(run.runId(), RunStatus.COMPLETED, reply, null, null);
+        conversationService.appendMessage(
+                run.conversationId(), MessageRole.ASSISTANT, reply, MessageStatus.COMPLETED);
+        writer.event("run.completed", new AgentStreamEvents.RunCompleted(run.runId(), reply));
+        // 只对成功完成的回答更新会话摘要，不把失败写成成功记忆。
+        updateSessionMemory(run, reply);
+    }
+
+    /**
+     * P14-A：用户显式选择工具的快捷路径。跳过 Manager 分类与 Planner，
+     * 建立单个非 SQL 工具步骤，经角色能力 + ToolRegistry + Agent 工具白名单双层授权后
+     * 执行恰好一次；未授权/参数错误/执行失败都明确失败，不转为绕过白名单的调用。
+     */
+    public void executeToolInvocation(PreparedRun run, SseEventWriter writer) throws IOException {
+        ToolInvocationRequest request = run.toolInvocation();
+        String toolName = request.toolName();
+        String objective = "调用工具 " + toolName;
+        roleRecorder.record(run, "MANAGER");
+
+        graphStateService.enter(run.runId(), GraphNode.TOOL_INVOCATION, writer);
+        Long stepId = repository.insertStep(
+                run.runId(), TOOL_STEP_SEQUENCE, objective, null, "TOOL_ASSISTANT");
+        writer.event("agent.selected", new AgentStreamEvents.AgentSelected(
+                run.runId(), TOOL_STEP_SEQUENCE, objective, "TOOL_ASSISTANT"));
+        writer.event("plan.ready", new AgentStreamEvents.PlanReady(
+                run.runId(),
+                List.of(new AgentStreamEvents.PlanStep(stepId, TOOL_STEP_SEQUENCE, objective))));
+        planState.save(run.runId(), repository.findSteps(run.runId()));
+
+        // 双层授权之一：当前 Run 的 Agent 工具白名单（配置损坏时拒绝，不降级放行）。
+        if (!toolPolicy.allowsStrictly(run.runId(), toolName)) {
+            failToolStep(run, stepId, toolName, ErrorCode.TOOL_NOT_IN_AGENT_WHITELIST,
+                    "当前 Agent 配置未授权该工具：" + toolName, writer);
+            return;
+        }
+
+        writer.event("agent.started", new AgentStreamEvents.AgentStarted(
+                run.runId(), "TOOL_ASSISTANT", TOOL_ACTIVITY));
+        writer.event("step.started", new AgentStreamEvents.StepStarted(stepId, TOOL_STEP_SEQUENCE));
+
+        // 原子进入执行态：已被处理过（SSE 重连/前端重试）时不二次执行工具。
+        int claimed = repository.startNonSqlStep(stepId);
+        if (claimed == 0) {
+            replayToolStep(run, stepId, toolName, writer);
+            return;
+        }
+
+        ToolInvocation invocation = new ToolInvocation(
+                run.userId(), toolName, run.conversationId(), run.runId(), stepId, null, null);
+        ToolInvocationResult result;
+        try {
+            result = toolAssistant.invoke(invocation, request.args());
+        } catch (ApiException ex) {
+            writer.event("agent.completed", new AgentStreamEvents.AgentCompleted(
+                    run.runId(), "TOOL_ASSISTANT", TOOL_ACTIVITY, "FAILED"));
+            failToolStep(run, stepId, toolName, ex.getErrorCode(), ex.getMessage(), writer);
+            return;
+        } catch (RuntimeException ex) {
+            writer.event("agent.completed", new AgentStreamEvents.AgentCompleted(
+                    run.runId(), "TOOL_ASSISTANT", TOOL_ACTIVITY, "FAILED"));
+            failToolStep(run, stepId, toolName, ErrorCode.TOOL_EXECUTION_ERROR, "工具执行失败", writer);
+            return;
+        }
+
+        String summary = toolOutputSanitizer.summarize(result);
+        repository.completeNonSqlStep(stepId, summary);
+        repository.updateRunStatus(run.runId(), RunStatus.COMPLETED, summary, null, null);
+        conversationService.appendMessage(
+                run.conversationId(), MessageRole.ASSISTANT, summary, MessageStatus.COMPLETED);
+        writer.event("agent.completed", new AgentStreamEvents.AgentCompleted(
+                run.runId(), "TOOL_ASSISTANT", TOOL_ACTIVITY, "SUCCESS"));
+        roleRecorder.record(run, "TOOL_ASSISTANT");
+        writer.event("step.succeeded", new AgentStreamEvents.StepSucceeded(
+                stepId, 0, false, summary));
+        writer.event("tool.result", new AgentStreamEvents.ToolResult(
+                run.runId(), stepId, toolName, "SUCCEEDED", summary));
+        graphStateService.enter(run.runId(), GraphNode.COMPLETED, writer);
+        writer.event("run.completed", new AgentStreamEvents.RunCompleted(run.runId(), summary));
+        approvalSessionStore.removeRun(run.runId());
+        planState.clear(run.runId());
+        updateSessionMemory(run, summary);
+    }
+
+    /** 步骤已被处理过：只回放既有状态，绝不二次执行工具。 */
+    private void replayToolStep(PreparedRun run, Long stepId, String toolName, SseEventWriter writer)
+            throws IOException {
+        AgentStep existing = repository.findStep(run.runId(), stepId).orElse(null);
+        String status = existing == null ? "UNKNOWN" : existing.status().name();
+        String summary = existing != null && existing.resultSummary() != null
+                ? existing.resultSummary()
+                : "该工具调用已处理过，不重复执行";
+        writer.event("agent.completed", new AgentStreamEvents.AgentCompleted(
+                run.runId(), "TOOL_ASSISTANT", TOOL_ACTIVITY,
+                StepStatus.SUCCEEDED.name().equals(status) ? "SUCCESS" : "FAILED"));
+        writer.event("tool.result", new AgentStreamEvents.ToolResult(
+                run.runId(), stepId, toolName, status, summary));
+        graphStateService.enter(run.runId(), GraphNode.COMPLETED, writer);
+        writer.event("run.completed", new AgentStreamEvents.RunCompleted(run.runId(), summary));
+    }
+
+    private void failToolStep(PreparedRun run, Long stepId, String toolName, ErrorCode code, String message,
+                              SseEventWriter writer) throws IOException {
+        String safe = safeMessage(message);
+        repository.failNonSqlStep(stepId, code.name(), safe);
+        repository.updateRunStatus(run.runId(), RunStatus.FAILED, null, code.name(), safe);
+        graphStateService.enter(run.runId(), GraphNode.FAILED, writer);
+        writer.event("step.failed", new AgentStreamEvents.StepFailed(stepId, code.name(), safe));
+        writer.event("agent.completed", new AgentStreamEvents.AgentCompleted(
+                run.runId(), "TOOL_ASSISTANT", TOOL_ACTIVITY, "FAILED"));
+        writer.event("tool.result", new AgentStreamEvents.ToolResult(
+                run.runId(), stepId, toolName, "FAILED", safe));
+        writer.event("run.failed", new AgentStreamEvents.RunFailed(run.runId(), code.name(), safe));
+        approvalSessionStore.removeRun(run.runId());
+        planState.clear(run.runId());
+    }
+
+    public AgentPlan plan(PreparedRun run, String schema, SseEventWriter writer, EffectiveRunContext context)
+            throws IOException {
         writer.event("agent.started", new AgentStreamEvents.AgentStarted(run.runId(), "PLANNER", "plan"));
         try {
-            AgentPlan plan = llmLimiter.count(run.runId(), () -> planner.plan(run.question(), schema));
+            AgentPlan plan = llmLimiter.count(run.runId(), () -> planner.plan(
+                    run.question(), schema, context == null ? "" : context.effectiveContext()));
             writer.event("agent.completed", new AgentStreamEvents.AgentCompleted(
                     run.runId(), "PLANNER", "plan", "SUCCESS"));
             roleRecorder.record(run, "PLANNER");
@@ -140,8 +312,8 @@ public class AgentStepEngine {
         }
     }
 
-    public void executePlan(PreparedRun run, String schema, AgentPlan plan, SseEventWriter writer)
-            throws IOException {
+    public void executePlan(PreparedRun run, String schema, AgentPlan plan, SseEventWriter writer,
+                            EffectiveRunContext context) throws IOException {
         List<AgentStep> steps = createSteps(run.runId(), plan);
         for (AgentStep step : steps) {
             String role = roleAssigner.assign(step.objective()).name();
@@ -156,28 +328,27 @@ public class AgentStepEngine {
                         .toList()));
         // P12 S4：计划短期状态入 Redis（DB agent_steps 仍为事实来源）。
         planState.save(run.runId(), steps);
-        advance(run, steps.get(0), schema, writer);
+        advance(run, steps.get(0), schema, writer, context);
     }
 
-    public void advance(PreparedRun run, AgentStep step, String schema, SseEventWriter writer)
-            throws IOException {
+    public void advance(PreparedRun run, AgentStep step, String schema, SseEventWriter writer,
+                        EffectiveRunContext context) throws IOException {
         ResolvedAgentConfig config = run.config();
         boolean ragEnabled = config == null || config.ragEnabled();
-        List<KnowledgeSearchResponse.Hit> hits = ragEnabled
+        List<KnowledgeSearchResponse.Hit> hits = ragEnabled && (context == null || context.knowledge().isBlank())
                 ? contextAssembler.knowledgeHits(run)
                 : List.of();
-        contextAssembler.emitKnowledge(run.runId(), writer, hits);
+        if (!hits.isEmpty()) {
+            contextAssembler.emitKnowledge(run.runId(), writer, hits);
+        }
         int knowledgeBudget = config != null && config.memoryContextBudget() > 0
                 ? config.memoryContextBudget() : AgentContextAssembler.DEFAULT_KNOWLEDGE_CONTEXT_CHARS;
-        String knowledge = ragEnabled
-                ? contextAssembler.knowledgeContext(run, knowledgeBudget)
-                : "";
-
-        // 选择相关 Skill 并渲染指引（记录选择证据，不泄露模板全文到普通日志）
-        String skillGuidance = contextAssembler.skillGuidance(run, writer);
-
-        // 长期 Memory 注入（尊重 Agent 配置的 memory.enabled；按 workspace 过滤权限）
-        String memoryContext = contextAssembler.memoryContext(run, writer);
+        String knowledge = context != null && !context.knowledge().isBlank()
+                ? context.knowledge()
+                : (ragEnabled ? contextAssembler.knowledgeContext(run, knowledgeBudget) : "");
+        String memoryContext = context != null ? context.memoryContext() : "";
+        String skillGuidance = context != null ? context.skillGuidance() : "";
+        String effectiveContext = context == null ? "" : context.effectiveContext();
 
         graphStateService.enter(run.runId(), GraphNode.SQL_GENERATION, writer);
         writer.event("agent.started", new AgentStreamEvents.AgentStarted(run.runId(), "SQL_AGENT", "step-" + step.sequence()));
@@ -187,7 +358,7 @@ public class AgentStepEngine {
             String customPrompt = config == null ? "" : config.systemPrompt();
             sql = llmLimiter.count(run.runId(), () ->
                     sqlAssistant.generateSql(step.objective(), schema, previousSummaries(run.runId(), step.sequence()),
-                            knowledge + memoryContext, customPrompt, skillGuidance));
+                            knowledge + memoryContext, customPrompt, skillGuidance, effectiveContext));
             sql = guard.validate(sql, run.database());
         } catch (ApiException ex) {
             writer.event("agent.completed", new AgentStreamEvents.AgentCompleted(
@@ -298,8 +469,11 @@ public class AgentStepEngine {
                     run.id(), approval.userId(), run.conversationId(),
                     run.connectionId(), approval.database(), run.question(), approval.config());
             String schema = connectionService.schemaContext(approval.userId(), run.connectionId());
+            // P14-A：跨审批请求从服务端持久会话/Run 与授权资源重建必要上下文，
+            // 绝不信任客户端提供的“已压缩上下文”。
+            EffectiveRunContext context = rebuildContext(continuation, writer, schema);
             graphStateService.enter(run.id(), GraphNode.RUNNING, writer);
-            advance(continuation, next.get(), schema, writer);
+            advance(continuation, next.get(), schema, writer, context);
             return;
         }
 
@@ -326,6 +500,20 @@ public class AgentStepEngine {
                 run.id(), approval.userId(), run.conversationId(), run.connectionId(), approval.database(),
                 run.question(), approval.config());
         updateSessionMemory(prepared, summary);
+    }
+
+    /**
+     * P14-A：跨审批续跑时从服务端来源重建有效上下文（最近消息、会话摘要、授权 Schema/知识）。
+     * 不读取任何客户端回传的压缩结果。
+     */
+    private EffectiveRunContext rebuildContext(PreparedRun run, SseEventWriter writer, String schema)
+            throws IOException {
+        List<String> recent = conversationService.recentCompletedMessages(run.conversationId(), RECENT_TURNS);
+        String memory = conversationService.memorySummary(run.conversationId());
+        boolean pendingApproval = repository.findSteps(run.runId()).stream()
+                .anyMatch(step -> step.status() == StepStatus.WAITING_APPROVAL);
+        return contextAssembler.buildRunContext(
+                run, writer, recent, memory, schema, "", pendingApproval);
     }
 
     /** 会话记忆摘要更新：失败不影响本轮结果，下次请求退回最近轮消息。 */
@@ -367,6 +555,15 @@ public class AgentStepEngine {
                 .map(step -> "步骤 " + step.sequence() + "（" + step.objective() + "）："
                         + (step.resultSummary() == null ? "无结果" : step.resultSummary()))
                 .collect(Collectors.joining("\n"));
+    }
+
+    private static String safeMessage(String message) {
+        if (message == null || message.isBlank()) {
+            return "工具调用失败";
+        }
+        return message.length() > MAX_ERROR_MESSAGE_CHARS
+                ? message.substring(0, MAX_ERROR_MESSAGE_CHARS)
+                : message;
     }
 
     static String digest(QueryResultResponse result) {

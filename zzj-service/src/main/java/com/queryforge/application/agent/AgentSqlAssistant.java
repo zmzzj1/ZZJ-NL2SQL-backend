@@ -32,13 +32,40 @@ public class AgentSqlAssistant {
      */
     public String generateSql(String objective, String schema, String previousSummaries, String knowledge,
                               String customSystemPrompt, String skillGuidance) {
+        return generateSql(objective, schema, previousSummaries, knowledge, customSystemPrompt, skillGuidance, "");
+    }
+
+    /**
+     * 生成 SQL。{@code effectiveContext} 是本次运行真实构造并生效的分层上下文（L1–L4），
+     * 与 Manager/Planner 消费同一条受控上下文；为空时不影响既有行为。
+     */
+    public String generateSql(String objective, String schema, String previousSummaries, String knowledge,
+                              String customSystemPrompt, String skillGuidance, String effectiveContext) {
         String system = buildSqlSystem(customSystemPrompt);
         String raw = LlmTextCollector.collect(
                 llmClient.openChat(
                         system,
-                        AgentPrompts.sqlUserWithGuidance(objective, schema, previousSummaries, knowledge, skillGuidance)),
+                        AgentPrompts.sqlUserWithGuidance(
+                                objective, schema, previousSummaries, knowledge, skillGuidance, effectiveContext)),
                 objectMapper);
         return sanitizeSql(raw);
+    }
+
+    /**
+     * P14-A：闲聊自然语言回答。使用受控 system 提示，不生成 SQL/Python/JSON/报告，
+     * 不访问数据库或工具。空响应返回空串，由调用方决定兜底策略。
+     */
+    public String chitchatAnswer(String question, String conversationContext) {
+        String raw = LlmTextCollector.collect(
+                llmClient.openChat(
+                        AgentPrompts.CHITCHAT_SYSTEM,
+                        AgentPrompts.chitchatUser(question, conversationContext)),
+                objectMapper);
+        String answer = raw == null ? "" : raw.trim();
+        if (answer.length() > MAX_SUMMARY_CHARS) {
+            return answer.substring(0, MAX_SUMMARY_CHARS);
+        }
+        return answer;
     }
 
     /** 平台安全指令始终保留；自定义提示词只作为补充，禁止覆盖只读/审批/工具权限约束。 */

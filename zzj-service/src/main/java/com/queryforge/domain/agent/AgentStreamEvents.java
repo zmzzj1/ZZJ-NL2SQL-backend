@@ -103,4 +103,11 @@ public final class AgentStreamEvents {
     /** 本轮为某步骤选定的专业角色（指南 §6 / P1106）。 */
     public record AgentSelected(Long runId, int sequence, String objective, String role) {
     }
+
+    /**
+     * P14-A：显式工具单次执行的受限结果摘要（脱敏/截断，不回传工具完整输出原文）。
+     * 与步骤详情保持一致，不伪造 SQL。
+     */
+    public record ToolResult(Long runId, Long stepId, String toolName, String status, String summary) {
+    }
 }

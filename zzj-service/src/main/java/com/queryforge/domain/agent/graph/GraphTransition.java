@@ -18,7 +18,7 @@ public final class GraphTransition {
         EDGES.put(GraphNode.CREATED, EnumSet.of(GraphNode.ROUTING, GraphNode.CANCELED));
         EDGES.put(GraphNode.ROUTING, EnumSet.of(
                 GraphNode.PLANNING, GraphNode.KNOWLEDGE, GraphNode.WAITING_CLARIFICATION,
-                GraphNode.COMPLETED, GraphNode.FAILED));
+                GraphNode.TOOL_INVOCATION, GraphNode.COMPLETED, GraphNode.FAILED));
         EDGES.put(GraphNode.PLANNING, EnumSet.of(
                 GraphNode.CONTEXT_BUILDING, GraphNode.WAITING_CLARIFICATION, GraphNode.COMPLETED, GraphNode.FAILED));
         EDGES.put(GraphNode.CONTEXT_BUILDING, EnumSet.of(GraphNode.RUNNING, GraphNode.FAILED));

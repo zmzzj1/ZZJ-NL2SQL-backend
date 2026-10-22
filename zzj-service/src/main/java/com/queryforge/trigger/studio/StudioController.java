@@ -116,7 +116,7 @@ public class StudioController {
             @PathVariable Long agentId,
             @Valid @RequestBody TestRequest request) {
         CreateAgentRunRequest runRequest = new CreateAgentRunRequest(
-                request.conversationId(), request.connectionId(), request.userInput(), agentId, null, true, null);
+                request.conversationId(), request.connectionId(), request.userInput(), agentId, null, true, null, null);
         PreparedRun prepared = agentRunService.prepareStart(principal.id(), runRequest);
         return ResponseEntity.ok()
                 .contentType(EVENT_STREAM)

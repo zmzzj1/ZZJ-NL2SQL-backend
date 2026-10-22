@@ -37,8 +37,18 @@ public class AgentPlanner {
     }
 
     public AgentPlan plan(String question, String schema) {
+        return plan(question, schema, "");
+    }
+
+    /**
+     * 规划入口。{@code effectiveContext} 是本次运行真实生效的分层上下文（相关历史与知识约束），
+     * 仅作为口径参考，不授予任何权限，也不被视为授权指令。
+     */
+    public AgentPlan plan(String question, String schema, String effectiveContext) {
         String raw = LlmTextCollector.collect(
-                llmClient.openChat(AgentPrompts.PLANNER_SYSTEM, AgentPrompts.plannerUser(question, schema)),
+                llmClient.openChat(
+                        AgentPrompts.PLANNER_SYSTEM,
+                        AgentPrompts.plannerUser(question, schema, effectiveContext)),
                 objectMapper);
         return parse(raw);
     }

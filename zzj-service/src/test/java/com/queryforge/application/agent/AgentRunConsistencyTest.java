@@ -2,6 +2,7 @@ package com.queryforge.application.agent;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -156,11 +157,15 @@ class AgentRunConsistencyTest {
                 repository, conversationService, connectionService, planner, sqlAssistant,
                 executionService, guard, properties, managerRouter, graphStateService,
                 roleAssigner, approvalSessionStore, contextAssembler, failureHandler,
-                planState, roleRecorder, llmLimiter);
+                planState, roleRecorder, llmLimiter,
+                mock(com.queryforge.application.agent.roles.ToolAssistantAgent.class),
+                mock(com.queryforge.application.tool.AgentRunToolPolicy.class),
+                mock(com.queryforge.application.tool.ToolOutputSanitizer.class));
         service = new AgentRunService(
                 repository, conversationService, connectionService, sqlAssistant, objectMapper,
                 knowledgeService, configResolver, graphStateService, approvalSessionStore,
-                engine, contextAssembler, failureHandler, planState, roleRecorder, llmLimiter);
+                engine, contextAssembler, failureHandler, planState, roleRecorder, llmLimiter,
+                new com.queryforge.application.agent.ToolInvocationRequestGuard());
         lenient().when(roleAssigner.assign(anyString())).thenReturn(AgentRole.DATA_ANALYST);
     }
 
@@ -407,6 +412,7 @@ class AgentRunConsistencyTest {
         @DisplayName("CHITCHAT：直接完成，不生成 SQL")
         void chitchat() {
             stubRoute(AgentRoute.CHITCHAT);
+            lenient().when(sqlAssistant.chitchatAnswer(eq(QUESTION), anyString())).thenReturn(CHITCHAT_REPLY);
             lenient().when(sqlAssistant.memorySummary(null, QUESTION, CHITCHAT_REPLY)).thenReturn("摘要");
 
             String output = start(prepared());
@@ -454,7 +460,8 @@ class AgentRunConsistencyTest {
         void simple() throws Exception {
             stubRoute(AgentRoute.SIMPLE);
             stubSingleStepPlan();
-            when(sqlAssistant.generateSql(eq(QUESTION), eq(SCHEMA), eq(""), eq(""), eq(""), eq("")))
+            when(sqlAssistant.generateSql(
+                    eq(QUESTION), eq(SCHEMA), anyString(), anyString(), anyString(), anyString(), anyString()))
                     .thenReturn(SQL);
             when(guard.validate(SQL, DATABASE)).thenReturn(SQL);
 
@@ -474,10 +481,11 @@ class AgentRunConsistencyTest {
             stubRoute(AgentRoute.COMPLEX);
             lenient().when(knowledgeService.hits(USER_ID, CONNECTION_ID, QUESTION)).thenReturn(List.of());
             lenient().when(knowledgeService.knowledgeContext(USER_ID, CONNECTION_ID, QUESTION, 2000)).thenReturn("");
-            when(planner.plan(QUESTION, SCHEMA))
+            when(planner.plan(eq(QUESTION), eq(SCHEMA), anyString()))
                     .thenReturn(new AgentPlan(true, "", List.of(new AgentPlan.Step(QUESTION))));
             stubSingleStepPlan();
-            when(sqlAssistant.generateSql(eq(QUESTION), eq(SCHEMA), eq(""), eq(""), eq(""), eq("")))
+            when(sqlAssistant.generateSql(
+                    eq(QUESTION), eq(SCHEMA), anyString(), anyString(), anyString(), anyString(), anyString()))
                     .thenReturn(SQL);
             when(guard.validate(SQL, DATABASE)).thenReturn(SQL);
 
@@ -535,7 +543,7 @@ class AgentRunConsistencyTest {
     void sse_shouldFollowWireProtocol() throws Exception {
         stubRoute(AgentRoute.SIMPLE);
         stubSingleStepPlan();
-        when(sqlAssistant.generateSql(eq(QUESTION), eq(SCHEMA), eq(""), eq(""), eq(""), eq(""))).thenReturn(SQL);
+        when(sqlAssistant.generateSql(eq(QUESTION), eq(SCHEMA), eq(""), eq(""), eq(""), eq(""), anyString())).thenReturn(SQL);
         when(guard.validate(SQL, DATABASE)).thenReturn(SQL);
 
         String output = start(prepared());
@@ -556,7 +564,7 @@ class AgentRunConsistencyTest {
         lenient().when(connectionService.schemaContext(USER_ID, CONNECTION_ID)).thenReturn(SCHEMA);
         lenient().when(conversationService.recentCompletedMessages(CONVERSATION_ID, 6)).thenReturn(List.of());
         lenient().when(conversationService.memorySummary(CONVERSATION_ID)).thenReturn(null);
-        lenient().when(managerRouter.route(QUESTION, null))
+        lenient().when(managerRouter.route(any(ManagerRouter.RoutingContext.class)))
                 .thenReturn(new ManagerRouter.RouteDecision(route, "请补充数据源"));
     }
 

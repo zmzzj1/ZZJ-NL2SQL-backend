@@ -1,8 +1,10 @@
 package com.queryforge.domain.agent;
 
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
+import java.util.Map;
 
 /** P4：在一个已授权会话与数据源上启动 Agent 运行。 */
 public record CreateAgentRunRequest(
@@ -26,6 +28,28 @@ public record CreateAgentRunRequest(
         Boolean draft,
 
         /** 可选：当前工作空间，命中共享知识与工作空间记忆时生效（需成员资格）。 */
-        Long workspaceId
+        Long workspaceId,
+
+        /**
+         * P14-A：用户在输入框显式选择的工具调用（可选）。
+         * 仅当用户主动选中工具并填写参数时由前端提交；普通文本中出现工具名不会触发。
+         * 存在时跳过 Manager 分类与 Planner，走单次受控工具执行链。
+         */
+        @Valid
+        ToolInvocationRequest toolInvocation
 ) {
+
+    /**
+     * 一次显式工具调用的结构化请求。userId、角色、Run 归属与审计都由服务端创建，
+     * 不接受前端伪造的内部身份。
+     */
+    public record ToolInvocationRequest(
+            @NotBlank(message = "toolName 不能为空")
+            @Size(max = 100, message = "toolName 最长 100 字符")
+            String toolName,
+
+            /** 工具参数，必须是 JSON 对象（Map）；数组或标量由服务端拒绝。 */
+            Map<String, Object> args
+    ) {
+    }
 }

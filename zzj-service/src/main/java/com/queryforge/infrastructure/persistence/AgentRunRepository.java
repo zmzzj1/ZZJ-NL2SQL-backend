@@ -79,11 +79,19 @@ public class AgentRunRepository {
     }
 
     public Long insertStep(Long runId, int sequence, String objective, Integer dependsOn) {
+        return insertStep(runId, sequence, objective, dependsOn, "SQL_AGENT");
+    }
+
+    /**
+     * 插入步骤。P14-A：显式工具快捷路径使用 {@code TOOL_ASSISTANT} 角色，
+     * 仍复用 {@code agent_steps}（sql_text 为 null、sql_version 为 0），不伪造 SQL。
+     */
+    public Long insertStep(Long runId, int sequence, String objective, Integer dependsOn, String agentRole) {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbcTemplate.update(connection -> {
             PreparedStatement statement = connection.prepareStatement("""
                     INSERT INTO agent_steps (run_id, sequence, objective, depends_on, status, agent_role)
-                    VALUES (?, ?, ?, ?, ?, 'SQL_AGENT')
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """, Statement.RETURN_GENERATED_KEYS);
             statement.setLong(1, runId);
             statement.setInt(2, sequence);
@@ -94,6 +102,7 @@ public class AgentRunRepository {
                 statement.setInt(4, dependsOn);
             }
             statement.setString(5, StepStatus.PENDING.name());
+            statement.setString(6, agentRole == null || agentRole.isBlank() ? "SQL_AGENT" : agentRole);
             return statement;
         }, keyHolder);
         Number key = keyHolder.getKey();
@@ -101,6 +110,52 @@ public class AgentRunRepository {
             throw new IllegalStateException("Agent 步骤创建后未返回主键");
         }
         return key.longValue();
+    }
+
+    /**
+     * P14-A：非 SQL 步骤（显式工具）原子进入执行态。
+     * 只有仍处于 PENDING 的步骤会被置为 RUNNING，重复触发不会二次执行。
+     */
+    public int startNonSqlStep(Long stepId) {
+        return jdbcTemplate.update("""
+                        UPDATE agent_steps SET status = ?, updated_at = ?
+                        WHERE id = ? AND status = ?
+                        """,
+                StepStatus.RUNNING.name(),
+                LocalDateTime.now(),
+                stepId,
+                StepStatus.PENDING.name());
+    }
+
+    /** P14-A：非 SQL 步骤成功落库（仅写结果摘要，不动 sql/审批字段）。 */
+    public int completeNonSqlStep(Long stepId, String resultSummary) {
+        return jdbcTemplate.update("""
+                        UPDATE agent_steps
+                        SET status = ?, result_summary = ?, error_code = NULL, error_message = NULL,
+                            updated_at = ?
+                        WHERE id = ? AND status = ?
+                        """,
+                StepStatus.SUCCEEDED.name(),
+                resultSummary,
+                LocalDateTime.now(),
+                stepId,
+                StepStatus.RUNNING.name());
+    }
+
+    /** P14-A：非 SQL 步骤失败落库（不触碰 SQL 审批状态）。 */
+    public int failNonSqlStep(Long stepId, String errorCode, String errorMessage) {
+        return jdbcTemplate.update("""
+                        UPDATE agent_steps
+                        SET status = ?, error_code = ?, error_message = ?, updated_at = ?
+                        WHERE id = ? AND status IN (?, ?)
+                        """,
+                StepStatus.FAILED.name(),
+                errorCode,
+                errorMessage,
+                LocalDateTime.now(),
+                stepId,
+                StepStatus.PENDING.name(),
+                StepStatus.RUNNING.name());
     }
 
     public Optional<AgentRun> findRunOwned(Long runId, Long userId) {
