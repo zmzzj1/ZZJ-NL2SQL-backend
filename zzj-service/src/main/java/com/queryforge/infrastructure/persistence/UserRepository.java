@@ -40,6 +40,22 @@ public class UserRepository {
         return Optional.ofNullable(userMapper.selectById(id)).map(UserRepository::toPrincipal);
     }
 
+    /** P13-M3B：按主键加载实体（状态/配额变更前判断目标是否存在）。 */
+    public Optional<UserEntity> findById(Long id) {
+        if (id == null) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(userMapper.selectById(id));
+    }
+
+    /** P13-M3B：真实更新账号状态（ACTIVE / DISABLED）。 */
+    public int setStatus(Long id, String status) {
+        UserEntity entity = new UserEntity();
+        entity.setId(id);
+        entity.setStatus(status);
+        return userMapper.updateById(entity);
+    }
+
     /** P13-M3A：管理端用户检索总行数（keyword 为空即全量）。 */
     public long countByKeyword(String keyword) {
         return userMapper.selectCount(keywordWrapper(keyword));
@@ -110,7 +126,8 @@ public class UserRepository {
                 entity.getEmail(),
                 entity.getDisplayName(),
                 entity.getPasswordHash(),
-                entity.getRole());
+                entity.getRole(),
+                entity.getStatus());
     }
 
     /** 并发注册时唯一索引兜底，由 Service 转换为统一错误码。 */

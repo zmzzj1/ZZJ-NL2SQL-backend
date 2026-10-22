@@ -21,4 +21,16 @@ public interface AdminQueryRpc {
     AdminRpcResult<AdminUserPage> listUsers(AdminActor actor, AdminUserQuery query);
 
     AdminRpcResult<AdminDashboardSummary> dashboard(AdminActor actor);
+
+    /**
+     * P13-M3B：启用/停用指定用户。{@code status} 仅允许合法值（ACTIVE / DISABLED）。
+     * Provider 以持久化角色判权，并真实更新 {@code users.status}；停用会踢除该用户所有会话。
+     */
+    AdminRpcResult<AdminUserOperationResult> setUserStatus(AdminActor actor, Long userId, String status);
+
+    /**
+     * P13-M3B：调整用户级 Token 配额（映射到 platform_quotas 的 USER 维度 token_limit）。
+     * {@code tokenQuota} 必须为非负整数；用户不存在返回 NOT_FOUND。
+     */
+    AdminRpcResult<AdminUserOperationResult> setUserQuota(AdminActor actor, Long userId, Long tokenQuota);
 }

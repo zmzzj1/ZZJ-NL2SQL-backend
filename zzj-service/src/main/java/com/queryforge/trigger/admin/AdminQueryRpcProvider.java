@@ -13,6 +13,7 @@ import com.zzj.common.admin.AdminDashboardSummary;
 import com.zzj.common.admin.AdminQueryRpc;
 import com.zzj.common.admin.AdminRpcErrorCode;
 import com.zzj.common.admin.AdminRpcResult;
+import com.zzj.common.admin.AdminUserOperationResult;
 import com.zzj.common.admin.AdminUserPage;
 import com.zzj.common.admin.AdminUserQuery;
 
@@ -47,15 +48,34 @@ public class AdminQueryRpcProvider implements AdminQueryRpc {
         return guarded(actor, adminQueryService::dashboard);
     }
 
+    @Override
+    public AdminRpcResult<AdminUserOperationResult> setUserStatus(AdminActor actor, Long userId, String status) {
+        return guarded(actor, () -> adminQueryService.setUserStatus(
+                actor == null ? null : actor.getUserId(), userId, status));
+    }
+
+    @Override
+    public AdminRpcResult<AdminUserOperationResult> setUserQuota(AdminActor actor, Long userId, Long tokenQuota) {
+        return guarded(actor, () -> adminQueryService.setUserQuota(
+                actor == null ? null : actor.getUserId(), userId, tokenQuota));
+    }
+
     private <T> AdminRpcResult<T> guarded(AdminActor actor, Supplier<T> supplier) {
         try {
             adminQueryService.requirePlatformAdmin(actor == null ? null : actor.getUserId());
             return AdminRpcResult.success(supplier.get());
         } catch (ApiException ex) {
             // 只回传错误码语义，不携带用户数据与内部细节。
-            AdminRpcErrorCode code = ex.getStatus() == HttpStatus.UNAUTHORIZED
-                    ? AdminRpcErrorCode.UNAUTHORIZED
-                    : AdminRpcErrorCode.FORBIDDEN;
+            AdminRpcErrorCode code;
+            if (ex.getStatus() == HttpStatus.UNAUTHORIZED) {
+                code = AdminRpcErrorCode.UNAUTHORIZED;
+            } else if (ex.getStatus() == HttpStatus.NOT_FOUND) {
+                code = AdminRpcErrorCode.NOT_FOUND;
+            } else if (ex.getStatus() == HttpStatus.BAD_REQUEST) {
+                code = AdminRpcErrorCode.BAD_REQUEST;
+            } else {
+                code = AdminRpcErrorCode.FORBIDDEN;
+            }
             return AdminRpcResult.failure(code, ex.getMessage());
         } catch (RuntimeException ex) {
             log.warn("admin_rpc_query_failed at={}", LocalDateTime.now(), ex);

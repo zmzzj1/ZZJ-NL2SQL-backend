@@ -18,16 +18,27 @@ public final class AdminUserSummary implements Serializable {
     private String displayName;
     private String role;
     private String createdAt;
+    /** P13-M3B：用户账号状态（ACTIVE / DISABLED），管理员可修改。 */
+    private String status;
+    /** P13-M3B：用户级 Token 配额（来自 platform_quotas 的 USER 维度 token_limit），未设置时为 null。 */
+    private Long tokenQuota;
 
     public AdminUserSummary() {
     }
 
     public AdminUserSummary(Long id, String email, String displayName, String role, String createdAt) {
+        this(id, email, displayName, role, createdAt, null, null);
+    }
+
+    public AdminUserSummary(Long id, String email, String displayName, String role, String createdAt,
+                            String status, Long tokenQuota) {
         this.id = id;
         this.email = email;
         this.displayName = displayName;
         this.role = role;
         this.createdAt = createdAt;
+        this.status = status;
+        this.tokenQuota = tokenQuota;
     }
 
     public Long getId() {
@@ -68,5 +79,21 @@ public final class AdminUserSummary implements Serializable {
 
     public void setCreatedAt(String createdAt) {
         this.createdAt = createdAt;
+    }
+
+    public String getStatus() {
+        return status;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
+    }
+
+    public Long getTokenQuota() {
+        return tokenQuota;
+    }
+
+    public void setTokenQuota(Long tokenQuota) {
+        this.tokenQuota = tokenQuota;
     }
 }

@@ -22,6 +22,8 @@ public class UserEntity {
     private String displayName;
     private String passwordHash;
     private String role;
+    /** P13-M3B：账号状态（ACTIVE / DISABLED），管理员可修改；默认 ACTIVE。 */
+    private String status;
     /** 注册时间由数据库默认值维护，实体只读（管理端展示需要，不参与写入）。 */
     @TableField("created_at")
     private LocalDateTime createdAt;
@@ -67,6 +69,14 @@ public class UserEntity {
 
     public void setRole(String role) {
         this.role = role;
+    }
+
+    public String getStatus() {
+        return status;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
     }
 
     public LocalDateTime getCreatedAt() {

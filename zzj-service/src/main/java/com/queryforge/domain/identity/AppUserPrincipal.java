@@ -16,17 +16,25 @@ public final class AppUserPrincipal implements UserDetails {
     private final String displayName;
     private final String passwordHash;
     private final String role;
+    /** P13-M3B：账号状态（ACTIVE / DISABLED）。null 视为 ACTIVE（兼容未迁移会话快照）。 */
+    private final String status;
 
     public AppUserPrincipal(Long id, String email, String displayName, String passwordHash) {
-        this(id, email, displayName, passwordHash, "USER");
+        this(id, email, displayName, passwordHash, "USER", null);
     }
 
     public AppUserPrincipal(Long id, String email, String displayName, String passwordHash, String role) {
+        this(id, email, displayName, passwordHash, role, null);
+    }
+
+    public AppUserPrincipal(Long id, String email, String displayName, String passwordHash, String role,
+                            String status) {
         this.id = id;
         this.email = email;
         this.displayName = displayName;
         this.passwordHash = passwordHash;
         this.role = (role == null || role.isBlank()) ? "USER" : role;
+        this.status = status;
     }
 
     public Long id() {
@@ -49,6 +57,11 @@ public final class AppUserPrincipal implements UserDetails {
     /** 服务端持久化的角色（Sa-Token 会话快照需要原样带回，不做前端可见的二次推导）。 */
     public String role() {
         return role;
+    }
+
+    /** P13-M3B：账号状态（可能为 null，表示未携带状态信息）。 */
+    public String status() {
+        return status;
     }
 
     @Override
@@ -83,6 +96,8 @@ public final class AppUserPrincipal implements UserDetails {
 
     @Override
     public boolean isEnabled() {
-        return true;
+        // P13-M3B：null 视为 ACTIVE（未迁移的会话快照不携带状态，保持既有行为）；
+        // DISABLED 用户登录将被 DaoAuthenticationProvider 的 preAuthenticationChecks 拒绝。
+        return status == null || "ACTIVE".equalsIgnoreCase(status);
     }
 }

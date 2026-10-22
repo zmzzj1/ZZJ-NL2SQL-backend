@@ -18,6 +18,8 @@ import com.queryforge.application.model.AdminGuard;
 import com.queryforge.domain.identity.AppUserPrincipal;
 import com.queryforge.domain.identity.UserEntity;
 import com.queryforge.infrastructure.persistence.UserRepository;
+import com.queryforge.infrastructure.identity.SaTokenIdentityService;
+import com.queryforge.infrastructure.persistence.ModelRepository;
 import com.queryforge.shared.error.ApiException;
 import com.zzj.common.admin.AdminDashboardSummary;
 import com.zzj.common.admin.AdminUserPage;
@@ -28,7 +30,9 @@ class AdminQueryServiceTest {
 
     private final UserRepository users = mock(UserRepository.class);
     private final JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
-    private final AdminQueryService service = new AdminQueryService(users, jdbcTemplate, new AdminGuard());
+    private final SaTokenIdentityService identityService = mock(SaTokenIdentityService.class);
+    private final ModelRepository modelRepository = mock(ModelRepository.class);
+    private final AdminQueryService service = new AdminQueryService(users, jdbcTemplate, new AdminGuard(), identityService, modelRepository);
 
     @Test
     void requirePlatformAdmin_shouldRejectUserRoleFromPersistence() {

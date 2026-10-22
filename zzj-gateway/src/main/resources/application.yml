@@ -90,6 +90,30 @@ spring:
             - Method=GET
           metadata:
             response-timeout: ${API_RESPONSE_TIMEOUT_MS:60000}
+        # P13-M3B：新增管理操作精确路由（必须排在 /api/** 兜底路由之前）。
+        # 只转发权限自检与用户状态/配额变更；其余 /api/v1/admin/**（overview、model-usage、quotas、audits）
+        # 继续由核心业务服务提供。
+        - id: admin-check
+          uri: lb://zzj-admin
+          predicates:
+            - Path=/api/v1/admin/check
+            - Method=GET
+          metadata:
+            response-timeout: ${API_RESPONSE_TIMEOUT_MS:60000}
+        - id: admin-user-status
+          uri: lb://zzj-admin
+          predicates:
+            - Path=/api/v1/admin/users/{userId}/status
+            - Method=PUT
+          metadata:
+            response-timeout: ${API_RESPONSE_TIMEOUT_MS:60000}
+        - id: admin-user-quota
+          uri: lb://zzj-admin
+          predicates:
+            - Path=/api/v1/admin/users/{userId}/quota
+            - Method=PUT
+          metadata:
+            response-timeout: ${API_RESPONSE_TIMEOUT_MS:60000}
         # ---- 业务 API 统一入口：保留完整 /api 前缀（Service Controller 直接映射 /api/v1/**）----
         - id: core-service-api
           uri: lb://zzj-service

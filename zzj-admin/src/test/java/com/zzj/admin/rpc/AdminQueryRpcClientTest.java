@@ -17,6 +17,7 @@ import com.zzj.common.admin.AdminRpcErrorCode;
 import com.zzj.common.admin.AdminRpcResult;
 import com.zzj.common.admin.AdminUserPage;
 import com.zzj.common.admin.AdminUserQuery;
+import com.zzj.common.admin.AdminUserOperationResult;
 
 /** RPC 语义到 HTTP 语义的映射：业务失败按码翻译，通道失败一律 503。 */
 class AdminQueryRpcClientTest {
@@ -95,6 +96,22 @@ class AdminQueryRpcClientTest {
                 throw rpcException;
             }
             return dashboard;
+        }
+
+        @Override
+        public AdminRpcResult<AdminUserOperationResult> setUserStatus(AdminActor actor, Long userId, String status) {
+            if (rpcException != null) {
+                throw rpcException;
+            }
+            return AdminRpcResult.success(null);
+        }
+
+        @Override
+        public AdminRpcResult<AdminUserOperationResult> setUserQuota(AdminActor actor, Long userId, Long tokenQuota) {
+            if (rpcException != null) {
+                throw rpcException;
+            }
+            return AdminRpcResult.success(null);
         }
     }
 }

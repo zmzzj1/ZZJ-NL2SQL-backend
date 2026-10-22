@@ -3,6 +3,9 @@ package com.zzj.admin.web;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -11,6 +14,7 @@ import com.zzj.admin.identity.AdminSessionService;
 import com.zzj.admin.rpc.AdminQueryRpcClient;
 import com.zzj.common.admin.AdminActor;
 import com.zzj.common.admin.AdminDashboardSummary;
+import com.zzj.common.admin.AdminUserOperationResult;
 import com.zzj.common.admin.AdminUserPage;
 import com.zzj.common.admin.AdminUserQuery;
 
@@ -51,6 +55,40 @@ public class AdminQueryController {
     public AdminDashboardSummary dashboard(HttpServletRequest request) {
         AdminPrincipal principal = requirePlatformAdmin(request);
         return rpcClient.dashboard(new AdminActor(principal.userId(), principal.role()));
+    }
+
+    /**
+     * P13-M3B：平台管理权限自检。未登录或普通用户由 {@link #requirePlatformAdmin} 拒绝（401/403）；
+     * 管理员返回 isAdmin=true。前端据此决定是否展示管理操作入口。
+     */
+    @GetMapping("/check")
+    public AdminCheckResponse check(HttpServletRequest request) {
+        AdminPrincipal principal = requirePlatformAdmin(request);
+        return new AdminCheckResponse(true, principal.role());
+    }
+
+    /**
+     * P13-M3B：启用/停用用户。UserId 来自路径，状态来自请求体；真实更新由核心服务完成。
+     */
+    @PutMapping("/users/{userId}/status")
+    public AdminUserOperationResult setUserStatus(HttpServletRequest request,
+                                                 @PathVariable("userId") Long userId,
+                                                 @RequestBody AdminUserStatusRequest body) {
+        AdminPrincipal principal = requirePlatformAdmin(request);
+        return rpcClient.setUserStatus(new AdminActor(principal.userId(), principal.role()), userId,
+                body == null ? null : body.status());
+    }
+
+    /**
+     * P13-M3B：调整用户级 Token 配额。真实写入 platform_quotas 的 USER 维度。
+     */
+    @PutMapping("/users/{userId}/quota")
+    public AdminUserOperationResult setUserQuota(HttpServletRequest request,
+                                               @PathVariable("userId") Long userId,
+                                               @RequestBody AdminUserQuotaRequest body) {
+        AdminPrincipal principal = requirePlatformAdmin(request);
+        Long tokenQuota = body == null ? null : body.tokenQuota();
+        return rpcClient.setUserQuota(new AdminActor(principal.userId(), principal.role()), userId, tokenQuota);
     }
 
     private AdminPrincipal requirePlatformAdmin(HttpServletRequest request) {

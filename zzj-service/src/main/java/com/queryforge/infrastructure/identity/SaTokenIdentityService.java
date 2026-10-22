@@ -44,6 +44,17 @@ public class SaTokenIdentityService {
     }
 
     /**
+     * P13-M3B：强制踢除指定用户的所有登录会话（停用账号时调用，使既有会话立即失效）。
+     * 登录 id 即用户主键，与 {@link #establish} 写入的一致；kickout 后该用户旧的 token 全部作废。
+     */
+    public void forceLogout(Long userId) {
+        if (userId == null) {
+            return;
+        }
+        StpUtil.kickout(userId);
+    }
+
+    /**
      * 从当前请求解析登录主体：cookie/header 中的 token 只是"材料"，
      * userId 等身份字段一律以 Redis 中的服务端会话为准。
      *

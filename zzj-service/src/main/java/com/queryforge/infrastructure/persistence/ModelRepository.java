@@ -346,6 +346,26 @@ public class ModelRepository {
         return rows.stream().findFirst();
     }
 
+    /**
+     * P13-M3B：批量读取 USER 维度 Token 配额（scope_type='USER'）。
+     * 入参均为系统内部 Long 主键，非外部字符串，IN 子句无拼接注入面；空列表直接返回空 Map。
+     */
+    public java.util.Map<Long, Long> findUserTokenQuotas(java.util.List<Long> userIds) {
+        if (userIds == null || userIds.isEmpty()) {
+            return java.util.Map.of();
+        }
+        String in = userIds.stream().map(String::valueOf).collect(java.util.stream.Collectors.joining(","));
+        List<java.util.Map.Entry<Long, Long>> rows = jdbcTemplate.query(
+                "SELECT scope_id, token_limit FROM platform_quotas WHERE scope_type = 'USER' AND scope_id IN ("
+                        + in + ")",
+                (rs, rowNum) -> java.util.Map.entry(rs.getLong("scope_id"), rs.getLong("token_limit")));
+        java.util.Map<Long, Long> map = new java.util.HashMap<>();
+        for (java.util.Map.Entry<Long, Long> row : rows) {
+            map.put(row.getKey(), row.getValue());
+        }
+        return map;
+    }
+
     // ---- Audit ----
 
     public void audit(Long actorId, String action, String targetType, Long targetId, String detail, String result) {

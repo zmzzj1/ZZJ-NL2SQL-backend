@@ -6,13 +6,17 @@ import com.queryforge.shared.error.ErrorCode;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import com.queryforge.application.model.AdminGuard;
 import com.queryforge.domain.identity.UserEntity;
+import com.queryforge.infrastructure.identity.SaTokenIdentityService;
+import com.queryforge.infrastructure.persistence.ModelRepository;
 import com.queryforge.infrastructure.persistence.UserRepository;
 import com.zzj.common.admin.AdminDashboardSummary;
+import com.zzj.common.admin.AdminUserOperationResult;
 import com.zzj.common.admin.AdminUserPage;
 import com.zzj.common.admin.AdminUserQuery;
 import com.zzj.common.admin.AdminUserSummary;
@@ -30,15 +34,25 @@ public class AdminQueryService {
     private static final DateTimeFormatter TIMESTAMP = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final String ADMIN_ROLE = "ADMIN";
     private static final String SUCCESS_STATUS = "SUCCESS";
+    /** P13-M3B：合法账号状态集合。 */
+    private static final String STATUS_ACTIVE = "ACTIVE";
+    private static final String STATUS_DISABLED = "DISABLED";
+    /** P13-M3B：用户级 Token 配额上限（防止溢出与异常大值）。 */
+    private static final long MAX_TOKEN_QUOTA = 9_000_000_000_000L;
 
     private final UserRepository users;
     private final JdbcTemplate jdbcTemplate;
     private final AdminGuard adminGuard;
+    private final SaTokenIdentityService identityService;
+    private final ModelRepository modelRepository;
 
-    public AdminQueryService(UserRepository users, JdbcTemplate jdbcTemplate, AdminGuard adminGuard) {
+    public AdminQueryService(UserRepository users, JdbcTemplate jdbcTemplate, AdminGuard adminGuard,
+                             SaTokenIdentityService identityService, ModelRepository modelRepository) {
         this.users = users;
         this.jdbcTemplate = jdbcTemplate;
         this.adminGuard = adminGuard;
+        this.identityService = identityService;
+        this.modelRepository = modelRepository;
     }
 
     /**
@@ -60,9 +74,12 @@ public class AdminQueryService {
         AdminUserQuery safeQuery = query == null ? new AdminUserQuery() : query;
         long total = users.countByKeyword(safeQuery.getKeyword());
         List<UserEntity> rows = users.pageByKeyword(safeQuery.getKeyword(), safeQuery.getPage(), safeQuery.getSize());
+        Map<Long, Long> quotas = modelRepository.findUserTokenQuotas(
+                rows.stream().map(UserEntity::getId).toList());
         List<AdminUserSummary> items = rows.stream()
                 .map(row -> new AdminUserSummary(row.getId(), row.getEmail(), row.getDisplayName(), row.getRole(),
-                        row.getCreatedAt() == null ? null : TIMESTAMP.format(row.getCreatedAt())))
+                        row.getCreatedAt() == null ? null : TIMESTAMP.format(row.getCreatedAt()),
+                        normalizeStatus(row.getStatus()), quotas.get(row.getId())))
                 .toList();
         return new AdminUserPage(items, total, safeQuery.getPage(), safeQuery.getSize());
     }
@@ -89,5 +106,74 @@ public class AdminQueryService {
     private long count(String sql, Object... args) {
         Long value = jdbcTemplate.queryForObject(sql, Long.class, args);
         return value == null ? 0L : value;
+    }
+
+    /**
+     * P13-M3B：启用/停用用户。管理员身份以持久化角色重新判定；
+     * 不允管理员停用自己（避免唯一管理员被锁死），停用会踢除目标所有会话。
+     */
+    public AdminUserOperationResult setUserStatus(Long actorId, Long userId, String status) {
+        AppUserPrincipal actor = requirePlatformAdmin(actorId);
+        if (userId == null) {
+            throw new ApiException(ErrorCode.VALIDATION_ERROR, HttpStatus.BAD_REQUEST, "缺少用户 ID");
+        }
+        String normalized = normalizeStatus(status);
+        if (normalized == null) {
+            throw new ApiException(ErrorCode.VALIDATION_ERROR, HttpStatus.BAD_REQUEST,
+                    "非法的账号状态，仅允许 ACTIVE 或 DISABLED");
+        }
+        if (userId.equals(actor.id())) {
+            throw new ApiException(ErrorCode.VALIDATION_ERROR, HttpStatus.BAD_REQUEST, "不能修改自己的账号状态");
+        }
+        UserEntity target = users.findById(userId)
+                .orElseThrow(() -> new ApiException(ErrorCode.USER_NOT_FOUND, HttpStatus.NOT_FOUND, "用户不存在"));
+        users.setStatus(userId, normalized);
+        if (STATUS_DISABLED.equals(normalized)) {
+            // 立即让既有会话失效，禁用状态才能阻断敏感操作（rule 5）。
+            identityService.forceLogout(userId);
+        }
+        modelRepository.audit(actor.id(), "SET_USER_STATUS", "USER", userId,
+                "status=" + normalized, "SUCCESS");
+        return new AdminUserOperationResult(userId, normalized,
+                readUserTokenQuota(userId), target.getRole());
+    }
+
+    /**
+     * P13-M3B：调整用户级 Token 配额。映射到 platform_quotas 的 USER 维度 token_limit；
+     * 不影响其它维度或无关用户。
+     */
+    public AdminUserOperationResult setUserQuota(Long actorId, Long userId, Long tokenQuota) {
+        AppUserPrincipal actor = requirePlatformAdmin(actorId);
+        if (userId == null) {
+            throw new ApiException(ErrorCode.VALIDATION_ERROR, HttpStatus.BAD_REQUEST, "缺少用户 ID");
+        }
+        if (tokenQuota == null || tokenQuota < 0 || tokenQuota > MAX_TOKEN_QUOTA) {
+            throw new ApiException(ErrorCode.VALIDATION_ERROR, HttpStatus.BAD_REQUEST,
+                    "Token 配额必须为 0 至 " + MAX_TOKEN_QUOTA + " 之间的非负整数");
+        }
+        UserEntity target = users.findById(userId)
+                .orElseThrow(() -> new ApiException(ErrorCode.USER_NOT_FOUND, HttpStatus.NOT_FOUND, "用户不存在"));
+        modelRepository.upsertQuota("USER", userId, null, null, tokenQuota, null, null, actor.id());
+        modelRepository.audit(actor.id(), "SET_USER_QUOTA", "USER", userId,
+                "tokenQuota=" + tokenQuota, "SUCCESS");
+        return new AdminUserOperationResult(userId, normalizeStatus(target.getStatus()),
+                tokenQuota, target.getRole());
+    }
+
+    private long readUserTokenQuota(Long userId) {
+        return modelRepository.findQuota("USER", userId)
+                .map(com.queryforge.infrastructure.persistence.ModelRepository.QuotaRow::tokenLimit)
+                .orElse(0L);
+    }
+
+    private static String normalizeStatus(String status) {
+        if (status == null) {
+            return null;
+        }
+        String trimmed = status.trim().toUpperCase(java.util.Locale.ROOT);
+        if (STATUS_ACTIVE.equals(trimmed) || STATUS_DISABLED.equals(trimmed)) {
+            return trimmed;
+        }
+        return null;
     }
 }

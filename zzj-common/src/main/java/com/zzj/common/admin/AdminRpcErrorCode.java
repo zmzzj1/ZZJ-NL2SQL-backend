@@ -16,6 +16,8 @@ public enum AdminRpcErrorCode {
     BAD_REQUEST,
     /** 依赖的数据不可用（数据库故障等）；与 RPC 通道不可用区分对待。 */
     UNAVAILABLE,
+    /** 目标资源不存在（如用户 ID 无效）。 */
+    NOT_FOUND,
     /** 其它未分类失败。 */
     INTERNAL
 }

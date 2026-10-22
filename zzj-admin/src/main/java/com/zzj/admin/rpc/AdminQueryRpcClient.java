@@ -14,6 +14,7 @@ import com.zzj.common.admin.AdminDashboardSummary;
 import com.zzj.common.admin.AdminQueryRpc;
 import com.zzj.common.admin.AdminRpcErrorCode;
 import com.zzj.common.admin.AdminRpcResult;
+import com.zzj.common.admin.AdminUserOperationResult;
 import com.zzj.common.admin.AdminUserPage;
 import com.zzj.common.admin.AdminUserQuery;
 
@@ -39,6 +40,14 @@ public class AdminQueryRpcClient {
 
     public AdminDashboardSummary dashboard(AdminActor actor) {
         return unwrap(() -> adminQueryRpc.dashboard(actor));
+    }
+
+    public AdminUserOperationResult setUserStatus(AdminActor actor, Long userId, String status) {
+        return unwrap(() -> adminQueryRpc.setUserStatus(actor, userId, status));
+    }
+
+    public AdminUserOperationResult setUserQuota(AdminActor actor, Long userId, Long tokenQuota) {
+        return unwrap(() -> adminQueryRpc.setUserQuota(actor, userId, tokenQuota));
     }
 
     private <T> T unwrap(Supplier<AdminRpcResult<T>> invocation) {
@@ -72,6 +81,9 @@ public class AdminQueryRpcClient {
         }
         if (code == AdminRpcErrorCode.BAD_REQUEST) {
             return new AdminApiException(AdminErrorCode.VALIDATION_ERROR, HttpStatus.BAD_REQUEST, message);
+        }
+        if (code == AdminRpcErrorCode.NOT_FOUND) {
+            return new AdminApiException(AdminErrorCode.RESOURCE_NOT_FOUND, HttpStatus.NOT_FOUND, message);
         }
         return new AdminApiException(AdminErrorCode.SERVICE_UNAVAILABLE, HttpStatus.SERVICE_UNAVAILABLE, message);
     }
