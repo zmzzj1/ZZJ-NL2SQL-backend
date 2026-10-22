@@ -23,7 +23,7 @@ Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL �
 - 查询历史 CSV 导出：重新校验资源权限与 SQL Guard、重新执行受限查询，并防止表格公式注入。
 - Agent Studio：草稿 CRUD、工具白名单、RAG/Memory 策略、Skill 绑定、发布不可变版本、回滚与审计。
 - Skill Registry：CRUD、不可变版本发布、模板白名单变量校验、运行时按相关性选择并注入。
-- 运行配置由 `src/main/java/com/queryforge/application/agent/RuntimeConfigResolver.java` 统一解析，配置真正影响 Manager/Agent Run/Tool Registry；Run 固定版本快照。
+- 运行配置由 `zzj-service/src/main/java/com/queryforge/application/agent/RuntimeConfigResolver.java` 统一解析，配置真正影响 Manager/Agent Run/Tool Registry；Run 固定版本快照。
 - 工作空间：OWNER/ADMIN/EDITOR/VIEWER 成员角色与资源授权；共享知识或 Agent 不自动授予数据源和 SQL 执行权限。
 - 混合 RAG：关键词、真实 Embedding 向量和 RRF 融合三种模式，命中结果保留来源、版本与分数。
 - 长期记忆：个人/空间作用域、类型、来源、置信度、去重、禁用与检索，并按用户及空间权限隔离。
@@ -38,21 +38,21 @@ Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL �
 
 ```bash
 # 管理库：用户与连接配置
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/02-management-schema.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/02-management-schema.sql
 
 # 两个隔离测试库：sql_demo_a(shop_*) / sql_demo_b(blog_*)
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/03-test-databases.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/03-test-databases.sql
 
 # 按版本顺序执行管理库增量脚本
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/04-conversations-history.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/05-agent-runs.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/06-knowledge-memory.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/07-p6-tools-analysis-report-mcp-workflow.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/08-p7-agent-studio-skill.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/09-p8-workspace-rag-memory.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/10-p9-model-governance.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/11-p10-workflow-schedule.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < src/main/resources/db/12-p11-agent-graph.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/04-conversations-history.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/05-agent-runs.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/06-knowledge-memory.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/07-p6-tools-analysis-report-mcp-workflow.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/08-p7-agent-studio-skill.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/09-p8-workspace-rag-memory.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/10-p9-model-governance.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/11-p10-workflow-schedule.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/12-p11-agent-graph.sql
 ```
 
 创建账号（密码由本地管理员设置，不提交仓库）：
@@ -110,13 +110,35 @@ Spring 属性（通过 `--app.*=value` 或外部配置传入）：
 
 ## 启动与测试
 
+P13-M1 起本目录是 Maven 聚合父工程（`packaging=pom`），含两个可独立运行的子模块：
+
+| 模块 | 端口 | 说明 |
+| --- | --- | --- |
+| `zzj-service` | 8081（仅回环） | 全部既有核心业务（SQL/Agent/Workflow/RAG/Memory/Studio/认证），注册到 Nacos |
+| `zzj-gateway` | 8080 | 公开接入层：WebFlux Gateway + Nacos Discovery + LoadBalancer，转发 `/api/**` 到 `lb://zzj-service` |
+
+前端 `/api` 仍然指向 8080（Vite 代理不变），因此页面代码无需改动；8080 现在是网关而不是业务进程。
+
 ```powershell
 # 确保 JAVA_HOME 指向本机安装的 JDK 21
-mvn verify
-mvn spring-boot:run
+mvn verify            # 在 backend/ 下构建整个 Reactor
+
+# 逐个启动（统一以 backend/ 为工作目录，保证 ./config 与 tools/ 相对路径语义不变）
+# 1) Nacos（standalone）
+# 2) zzj-service
+$env:PG_PASSWORD='<postgres-password>'
+java -jar zzj-service/target/zzj-service.jar --server.port=8081
+# 3) zzj-gateway
+java -jar zzj-gateway/target/zzj-gateway.jar --server.port=8080
 ```
 
-健康检查：`GET http://127.0.0.1:8080/api/health`。
+也可使用 `scripts/start-local.sh {nacos|service|gateway}`。
+
+健康检查：
+
+- 经网关：`GET http://127.0.0.1:8080/api/health`（转发到 Service）
+- 直连排障：`GET http://127.0.0.1:8081/api/health`（仅回环可达，不作为公开入口）
+- 网关自身：`GET http://127.0.0.1:8080/actuator/health`
 
 ## 接口
 
@@ -190,7 +212,7 @@ mvn spring-boot:run
 - **pgvector（S3）**：独立 PostgreSQL 数据源（`PgVectorConfig`/`PgVectorStore`）存 GLOSSARY / QUESTION_KNOWLEDGE / MEMORY 三类向量投影；余弦相似度 Top-K，服务端 `userId + connectionId + vectorType`（工作空间记忆按 `workspace_id`）过滤；MySQL 授权候选集做最终复核；删除/停用同步软失效；PG/Embedding 故障 fail-soft 不阻塞主链路。
 - **Redis/Redisson 四场景（S4）**：Agent 计划短期上下文（`AgentPlanStore`，TTL + RLock）、HITL 待审批会话（`ApprovalSessionStore`，原子领取）、模型会话亲和（`ModelSessionAffinity`，短 TTL 键）、定时任务互斥（`ScheduleRunLock`，按任务 ID RLock，未获取即跳过）。
 - **Caffeine + 连接池（S5）**：连接 Schema 有界缓存（`ConnectionSchemaCache`，TTL 5min/500 条/变更显式失效）；目标库 Hikari 池按连接复用（`TargetConnectionFactory`，空闲过期即关池、`SET SESSION TRANSACTION READ ONLY`、淘汰不泄漏）。
-- MySQL 侧零新增表；PG 侧唯一增量 DDL：`src/main/resources/db/13-p12-pgvector.sql`（手工执行，不引入 Flyway）。
+- MySQL 侧零新增表；PG 侧唯一增量 DDL：`zzj-service/src/main/resources/db/13-p12-pgvector.sql`（手工执行，不引入 Flyway）。
 
 ## 本地模型测试桩
 
@@ -204,5 +226,5 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn s
 
 ## 测试
 
-- `mvn verify`：350 个自动化用例（0 failures/0 errors/12 skipped，2026-10-22 实跑）；跳过项均为缺少对应外部测试环境时主动跳过的集成测试。覆盖 Controller 切片、Service 单元测试，以及 P6–P12（分析器/报告/工具/工作流/Studio/Skill/Workspace/RAG/Memory/模型治理/定时调度/CSV 导出/统一状态图/角色门禁/分层上下文/Spring AI 传输层/路由治理/MyBatis-Plus/Sa-Token 会话/pgvector 检索/Redisson 四场景/Caffeine 缓存与连接池）测试。
+- `mvn verify`：Reactor 共 355 个自动化用例（`zzj-service` 350 个、`zzj-gateway` 5 个；0 failures/0 errors/12 skipped，2026-10-22 实跑）；跳过项均为缺少对应外部测试环境时主动跳过的集成测试。覆盖 Controller 切片、Service 单元测试、网关身份头过滤，以及 P6–P12（分析器/报告/工具/工作流/Studio/Skill/Workspace/RAG/Memory/模型治理/定时调度/CSV 导出/统一状态图/角色门禁/分层上下文/Spring AI 传输层/路由治理/MyBatis-Plus/Sa-Token 会话/pgvector 检索/Redisson 四场景/Caffeine 缓存与连接池）测试。
 - 真实环境用例（MySQL/PostgreSQL/Redis）在缺少对应服务时自动跳过并在报告输出原因，不冒充通过。

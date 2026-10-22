@@ -1,18 +1,37 @@
 spring:
   application:
-    name: queryforge-sql-platform
+    # P13-M1：Nacos 注册名必须与 Gateway 的 lb://zzj-service 保持一致。
+    name: ${SERVICE_APP_NAME:zzj-service}
   config:
-    import: optional:file:./config/local.properties
+    # 运行约定：统一以 `backend/` 为工作目录启动，故 ./config 与 ./tools 语义不变；
+    # 需要换位置时可用 ZZJ_CONFIG_DIR 覆盖，不写死任何开发者绝对路径。
+    import: optional:file:${ZZJ_CONFIG_DIR:./config}/local.properties
   threads:
     virtual:
       enabled: true
   mvc:
     async:
       request-timeout: 120000
+  # P13-M1：Nacos 服务注册（仅 Discovery，不启用 Config；凭据一律走环境变量，不入库、不写源码）。
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+        namespace: ${NACOS_NAMESPACE:public}
+        group: ${NACOS_GROUP:DEFAULT_GROUP}
+        username: ${NACOS_USERNAME:}
+        password: ${NACOS_PASSWORD:}
+        # 显式注册回环地址：本机 Gateway 与 Service 同机，避免多网卡时注册到不可达 IP。
+        ip: ${NACOS_REGISTER_IP:127.0.0.1}
+        port: ${NACOS_REGISTER_PORT:8081}
+        heartbeat-interval: ${NACOS_HEARTBEAT_MS:5000}
+        heart-beat-timeout: ${NACOS_HEARTBEAT_TIMEOUT_MS:15000}
+        ip-delete-timeout: ${NACOS_IP_DELETE_TIMEOUT_MS:30000}
 
 server:
+  # P13-M1：核心业务服务默认 8081；仅绑定回环地址，公开入口交给 Gateway（8080）。
   address: 127.0.0.1
-  port: ${SERVER_PORT:8080}
+  port: ${SERVER_PORT:8081}
   shutdown: graceful
   servlet:
     session:

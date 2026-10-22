@@ -1,0 +1,97 @@
+server:
+  # P13-M1：公开接入层监听 8080（原前端 /api 代理目标不变）。
+  port: ${GATEWAY_PORT:8080}
+
+spring:
+  application:
+    name: zzj-gateway
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+        namespace: ${NACOS_NAMESPACE:public}
+        group: ${NACOS_GROUP:DEFAULT_GROUP}
+        username: ${NACOS_USERNAME:}
+        password: ${NACOS_PASSWORD:}
+        ip: ${NACOS_REGISTER_IP:127.0.0.1}
+        port: ${NACOS_REGISTER_PORT:${GATEWAY_PORT:8080}}
+    gateway:
+      httpclient:
+        # 全局保守超时：普通 API 60s；流式路由按 route metadata 单独放宽（见下）。
+        connect-timeout: ${GATEWAY_CONNECT_TIMEOUT_MS:5000}
+        response-timeout: ${GATEWAY_RESPONSE_TIMEOUT:60s}
+      # 不启用任何自动重试：登录/审批/SQL 执行/Agent/Workflow/Tool 的 POST 不允许被网关重放。
+      default-filters: []
+      routes:
+        # ---- 已确认流式（SSE）路由：单独放宽响应超时，其余路由保持 60s ----
+        - id: agent-run-stream
+          uri: lb://zzj-service
+          predicates:
+            - Path=/api/v1/agent/runs/stream
+            - Method=POST
+          metadata:
+            response-timeout: ${SSE_RESPONSE_TIMEOUT_MS:600000}
+        - id: agent-step-approve-stream
+          uri: lb://zzj-service
+          predicates:
+            - Path=/api/v1/agent/runs/{runId}/steps/{stepId}/approve/stream
+            - Method=POST
+          metadata:
+            response-timeout: ${SSE_RESPONSE_TIMEOUT_MS:600000}
+        - id: sql-generate-stream
+          uri: lb://zzj-service
+          predicates:
+            - Path=/api/v1/sql/generate/stream
+            - Method=POST
+          metadata:
+            response-timeout: ${SSE_RESPONSE_TIMEOUT_MS:600000}
+        - id: workflow-run-stream
+          uri: lb://zzj-service
+          predicates:
+            - Path=/api/v1/workflows/{id}/runs/stream
+            - Method=POST
+          metadata:
+            response-timeout: ${SSE_RESPONSE_TIMEOUT_MS:600000}
+        - id: workflow-node-approve-stream
+          uri: lb://zzj-service
+          predicates:
+            - Path=/api/v1/workflows/runs/{runId}/nodes/{nodeId}/approve/stream
+            - Method=POST
+          metadata:
+            response-timeout: ${SSE_RESPONSE_TIMEOUT_MS:600000}
+        - id: analysis-run-stream
+          uri: lb://zzj-service
+          predicates:
+            - Path=/api/v1/analysis/runs/stream
+            - Method=POST
+          metadata:
+            response-timeout: ${SSE_RESPONSE_TIMEOUT_MS:600000}
+        - id: studio-agent-test-stream
+          uri: lb://zzj-service
+          predicates:
+            - Path=/api/v1/studio/agents/{agentId}/test/stream
+            - Method=POST
+          metadata:
+            response-timeout: ${SSE_RESPONSE_TIMEOUT_MS:600000}
+        # ---- 业务 API 统一入口：保留完整 /api 前缀（Service Controller 直接映射 /api/v1/**）----
+        - id: core-service-api
+          uri: lb://zzj-service
+          predicates:
+            - Path=/api/**
+          metadata:
+            response-timeout: ${API_RESPONSE_TIMEOUT_MS:60000}
+
+management:
+  # 只暴露健康检查：路由表/管理端点不外泄（ADR-M1-002：网关不是管理中心）。
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  level:
+    org.springframework.cloud.gateway: INFO
+    com.alibaba.nacos: WARN
