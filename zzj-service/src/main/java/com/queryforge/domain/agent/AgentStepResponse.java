@@ -18,6 +18,8 @@ public record AgentStepResponse(
         Boolean truncated,
         String errorCode,
         String errorMessage,
-        String resultSummary
+        String resultSummary,
+        Long analysisRunId,
+        Long reportId
 ) {
 }

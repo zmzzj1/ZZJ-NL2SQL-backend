@@ -1,8 +1,8 @@
 package com.queryforge.application.agent.roles;
 
+import com.queryforge.application.agent.AuthorizedSqlInput;
 import com.queryforge.domain.analysis.AnalysisRunResponse;
 import com.queryforge.application.analysis.AnalysisService;
-import com.queryforge.domain.analysis.CreateAnalysisRunRequest;
 import org.springframework.stereotype.Service;
 import com.queryforge.domain.agent.roles.AgentRole;
 import com.queryforge.domain.agent.roles.RoleRegistry;
@@ -23,9 +23,30 @@ public class CodeAnalystAgent {
         this.analysisService = analysisService;
     }
 
-    public AnalysisRunResponse analyze(Long userId, CreateAnalysisRunRequest request) {
+    public AnalysisRunResponse analyze(Long userId, com.queryforge.domain.analysis.CreateAnalysisRunRequest request) {
         boolean usesSandbox = request.code() != null && !request.code().isBlank();
         registry.requireAllowed(AgentRole.CODE_ANALYST, usesSandbox ? "python_sandbox" : "builtin_analyzer");
         return analysisService.create(userId, request);
+    }
+
+    /**
+     * P14-C：对一次已审批 SQL 的真实结果做隔离 Python 分析。
+     * 入参必须是服务端审批执行或合规恢复流程产生的 {@link AuthorizedSqlInput}，
+     * 浏览器无法传入虚构 rows；角色/工具门禁先于任何执行。
+     */
+    public AnalysisRunResponse analyzeApprovedResult(Long userId, AuthorizedSqlInput input,
+                                                     String generatedPython, String chartType) {
+        registry.requireAllowed(AgentRole.CODE_ANALYST, "python_sandbox");
+        return analysisService.analyzeResult(
+                userId,
+                input.connectionId(),
+                input.conversationId(),
+                input.runId(),
+                input.stepId(),
+                input.queryHistoryId(),
+                input.sourceSql(),
+                input.result(),
+                generatedPython,
+                chartType);
     }
 }

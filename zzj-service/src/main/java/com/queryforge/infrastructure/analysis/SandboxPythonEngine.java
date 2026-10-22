@@ -95,13 +95,94 @@ public class SandboxPythonEngine implements AnalysisEngine {
             }
             try {
                 SandboxOutput parsed = objectMapper.readValue(structured, SandboxOutput.class);
-                return new AnalysisResult(parsed.charts(), parsed.summary(),
+                List<ChartSchema.TypedChart> charts = validateCharts(parsed.charts());
+                String summary = parsed.summary() == null ? "" : parsed.summary();
+                return new AnalysisResult(charts, summary,
                         tail(result.stdoutTail()), tail(result.stderrTail()), 0);
+            } catch (AnalysisExecutionException ex) {
+                throw ex;
             } catch (Exception ex) {
                 throw new AnalysisExecutionException("沙箱输出不是合法的图表 JSON", ex);
             }
         } catch (SandboxException ex) {
             throw new AnalysisExecutionException(ex.getMessage(), ex.getCause());
+        }
+    }
+
+    /**
+     * P14-C：严格校验图表 schema。类型只允许 table/bar/line/pie（反序列化已保证），
+     * 各类型必填字段缺失、类目与数值长度不一致、表格行列不匹配都视为数据非法，
+     * 分析失败，不得把残缺数据伪装成成功图表。
+     */
+    static List<ChartSchema.TypedChart> validateCharts(List<ChartSchema.TypedChart> charts)
+            throws AnalysisExecutionException {
+        if (charts == null) {
+            throw new AnalysisExecutionException("沙箱输出缺少 charts 数组");
+        }
+        for (ChartSchema.TypedChart chart : charts) {
+            if (chart instanceof ChartSchema.TableChart table) {
+                requireText(table.title(), "table.title");
+                if (table.columns() == null || table.columns().isEmpty()) {
+                    throw new AnalysisExecutionException("table 图表缺少 columns");
+                }
+                for (ChartSchema.Column column : table.columns()) {
+                    requireText(column.name(), "table.columns.name");
+                    requireText(column.dataType(), "table.columns.dataType");
+                }
+                if (table.data() == null) {
+                    throw new AnalysisExecutionException("table 图表缺少 data");
+                }
+                for (List<Object> row : table.data()) {
+                    if (row == null || row.size() != table.columns().size()) {
+                        throw new AnalysisExecutionException("table 图表行列数与列定义不一致");
+                    }
+                }
+                requireText(table.sourceRunId(), "table.sourceRunId");
+                continue;
+            }
+            List<String> categories;
+            List<Number> values;
+            String kind;
+            if (chart instanceof ChartSchema.BarChart bar) {
+                categories = bar.categories();
+                values = bar.values();
+                kind = "bar";
+                requireText(bar.title(), "bar.title");
+                requireText(bar.xLabel(), "bar.xLabel");
+                requireText(bar.yLabel(), "bar.yLabel");
+            } else if (chart instanceof ChartSchema.LineChart line) {
+                categories = line.categories();
+                values = line.values();
+                kind = "line";
+                requireText(line.title(), "line.title");
+                requireText(line.xLabel(), "line.xLabel");
+                requireText(line.yLabel(), "line.yLabel");
+            } else if (chart instanceof ChartSchema.PieChart pie) {
+                categories = pie.labels();
+                values = pie.values();
+                kind = "pie";
+                requireText(pie.title(), "pie.title");
+            } else {
+                throw new AnalysisExecutionException("不支持的图表类型");
+            }
+            if (categories == null || values == null) {
+                throw new AnalysisExecutionException(kind + " 图表缺少 categories/values");
+            }
+            if (categories.size() != values.size()) {
+                throw new AnalysisExecutionException(kind + " 图表类目与数值数量不一致");
+            }
+            for (int index = 0; index < values.size(); index++) {
+                if (values.get(index) == null || categories.get(index) == null) {
+                    throw new AnalysisExecutionException(kind + " 图表存在空类别或空数值");
+                }
+            }
+        }
+        return charts;
+    }
+
+    private static void requireText(String value, String field) throws AnalysisExecutionException {
+        if (value == null || value.isBlank()) {
+            throw new AnalysisExecutionException("沙箱输出图表缺少必填字段 " + field);
         }
     }
 

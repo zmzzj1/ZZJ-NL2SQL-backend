@@ -24,6 +24,8 @@ import com.queryforge.application.memory.MemoryService;
 import com.queryforge.application.query.SqlExecutionService;
 import com.queryforge.application.skill.SkillGuidanceSelector;
 import com.queryforge.application.skill.SkillService;
+import com.queryforge.application.agent.sql.SqlSelection;
+import com.queryforge.application.agent.sql.SqlSelectionRequest;
 import com.queryforge.domain.agent.AgentPlan;
 import com.queryforge.domain.agent.AgentProperties;
 import com.queryforge.domain.agent.AgentRoute;
@@ -122,6 +124,8 @@ class AgentRunConsistencyTest {
     private ApprovalSessionStore approvalSessionStore;
     @Mock
     private RoleAssigner roleAssigner;
+    @Mock
+    private com.queryforge.application.agent.sql.SqlCandidateSelectionService selectionService;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     /** 真实图服务的持久化后端（替代 agent_graph_checkpoints 表）。 */
@@ -144,6 +148,7 @@ class AgentRunConsistencyTest {
                     return 1;
                 });
         lenient().when(repository.llmCallCount(anyLong())).thenReturn(0);
+        lenient().when(repository.tryIncrementLlmCalls(anyLong(), anyInt())).thenReturn(1);
 
         AgentProperties properties = new AgentProperties(3, 2, 6000, 12);
         planState = new AgentPlanStateService(planStore);
@@ -160,7 +165,13 @@ class AgentRunConsistencyTest {
                 planState, roleRecorder, llmLimiter,
                 mock(com.queryforge.application.agent.roles.ToolAssistantAgent.class),
                 mock(com.queryforge.application.tool.AgentRunToolPolicy.class),
-                mock(com.queryforge.application.tool.ToolOutputSanitizer.class));
+                mock(com.queryforge.application.tool.ToolOutputSanitizer.class),
+                selectionService,
+                mock(AgentPythonAssistant.class),
+                mock(com.queryforge.application.agent.roles.CodeAnalystAgent.class),
+                mock(com.queryforge.application.report.ReportService.class),
+                mock(AgentReportComposer.class),
+                mock(com.queryforge.application.analysis.AnalysisService.class));
         service = new AgentRunService(
                 repository, conversationService, connectionService, sqlAssistant, objectMapper,
                 knowledgeService, configResolver, graphStateService, approvalSessionStore,
@@ -460,9 +471,8 @@ class AgentRunConsistencyTest {
         void simple() throws Exception {
             stubRoute(AgentRoute.SIMPLE);
             stubSingleStepPlan();
-            when(sqlAssistant.generateSql(
-                    eq(QUESTION), eq(SCHEMA), anyString(), anyString(), anyString(), anyString(), anyString()))
-                    .thenReturn(SQL);
+            when(selectionService.generateAndSelect(any(SqlSelectionRequest.class)))
+                    .thenReturn(new SqlSelection("SINGLE", SQL, 1, 1, 1, 0.0, 0.0, 0.0, false));
             when(guard.validate(SQL, DATABASE)).thenReturn(SQL);
 
             String output = start(prepared());
@@ -484,9 +494,8 @@ class AgentRunConsistencyTest {
             when(planner.plan(eq(QUESTION), eq(SCHEMA), anyString()))
                     .thenReturn(new AgentPlan(true, "", List.of(new AgentPlan.Step(QUESTION))));
             stubSingleStepPlan();
-            when(sqlAssistant.generateSql(
-                    eq(QUESTION), eq(SCHEMA), anyString(), anyString(), anyString(), anyString(), anyString()))
-                    .thenReturn(SQL);
+            when(selectionService.generateAndSelect(any(SqlSelectionRequest.class)))
+                    .thenReturn(new SqlSelection("MULTI", SQL, 1, 3, 2, 0.998, 0.9, 0.939, false));
             when(guard.validate(SQL, DATABASE)).thenReturn(SQL);
 
             String output = start(prepared());
@@ -521,7 +530,7 @@ class AgentRunConsistencyTest {
     void replay_shouldNotReExecute() throws Exception {
         AgentStep succeeded = new AgentStep(
                 STEP_ID, RUN_ID, 1, QUESTION, null, StepStatus.SUCCEEDED, SQL, 1, "SQL_AGENT",
-                ApprovalStatus.APPROVED, 0, 1, false, null, null, "返回 1 行", NOW, NOW);
+                ApprovalStatus.APPROVED, 0, 1, false, null, null, "返回 1 行", NOW, NOW, null, null);
         when(repository.findRunOwned(RUN_ID, USER_ID)).thenReturn(Optional.of(run(RunStatus.COMPLETED)));
         when(repository.findStep(RUN_ID, STEP_ID)).thenReturn(Optional.of(succeeded));
         when(connectionService.summary(USER_ID, CONNECTION_ID))
@@ -543,7 +552,8 @@ class AgentRunConsistencyTest {
     void sse_shouldFollowWireProtocol() throws Exception {
         stubRoute(AgentRoute.SIMPLE);
         stubSingleStepPlan();
-        when(sqlAssistant.generateSql(eq(QUESTION), eq(SCHEMA), eq(""), eq(""), eq(""), eq(""), anyString())).thenReturn(SQL);
+        when(selectionService.generateAndSelect(any(SqlSelectionRequest.class)))
+                .thenReturn(new SqlSelection("SINGLE", SQL, 1, 1, 1, 0.0, 0.0, 0.0, false));
         when(guard.validate(SQL, DATABASE)).thenReturn(SQL);
 
         String output = start(prepared());
@@ -571,7 +581,7 @@ class AgentRunConsistencyTest {
     private void stubSingleStepPlan() {
         lenient().when(knowledgeService.hits(USER_ID, CONNECTION_ID, QUESTION)).thenReturn(List.of());
         lenient().when(knowledgeService.knowledgeContext(USER_ID, CONNECTION_ID, QUESTION, 2000)).thenReturn("");
-        lenient().when(repository.insertStep(RUN_ID, 1, QUESTION, null)).thenReturn(STEP_ID);
+        lenient().when(repository.insertStep(RUN_ID, 1, QUESTION, null, "DATA_ANALYST")).thenReturn(STEP_ID);
         lenient().when(repository.findSteps(RUN_ID)).thenReturn(List.of(
                 step(StepStatus.PENDING, null, 0, 0)));
     }
@@ -609,7 +619,7 @@ class AgentRunConsistencyTest {
     private static AgentStep step(StepStatus status, String sql, int version, int repairCount) {
         return new AgentStep(
                 STEP_ID, RUN_ID, 1, QUESTION, null, status, sql, version, "SQL_AGENT",
-                ApprovalStatus.PENDING, repairCount, null, null, null, null, null, NOW, NOW);
+                ApprovalStatus.PENDING, repairCount, null, null, null, null, null, NOW, NOW, null, null);
     }
 
     private static QueryResultResponse result() {

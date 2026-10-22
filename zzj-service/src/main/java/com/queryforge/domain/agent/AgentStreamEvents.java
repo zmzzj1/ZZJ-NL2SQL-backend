@@ -110,4 +110,44 @@ public final class AgentStreamEvents {
      */
     public record ToolResult(Long runId, Long stepId, String toolName, String status, String summary) {
     }
+
+    /**
+     * P14-B：复杂 SQL 多候选选优的脱敏摘要。仅在成功选出 SQL 后、{@code step.sql_ready}
+     * 之前发送；{@code mode=SINGLE} 时不发送。只回传计数与分值，不包含候选原文、
+     * Schema 原文、Token 或模型推理过程。
+     */
+    public record SqlCandidatesEvaluated(
+            Long stepId,
+            String mode,
+            int totalCandidates,
+            int validCandidates,
+            int selectedCandidateIndex,
+            double ruleScore,
+            double llmScore,
+            double compositeScore,
+            boolean ruleFallback
+    ) {
+    }
+
+    /**
+     * P14-C：Code 步骤开始隔离 Python 分析（真实工件落库前只表示“开始”，不代表成功）。
+     */
+    public record AnalysisStarted(Long runId, Long stepId, String role) {
+    }
+
+    /**
+     * P14-C：分析工件真实落库后发送。chartCount/summary/durationMs 均来自真实执行结果，
+     * 不包含 stdout/stderr 原文、凭据或宿主路径。
+     */
+    public record AnalysisSucceeded(Long runId, Long stepId, Long analysisRunId, int chartCount,
+                                    String summary, long durationMs) {
+    }
+
+    /** P14-C：分析真实失败（沙箱不可用/退出码非零/输出非法/超时/预算不足等）。 */
+    public record AnalysisFailed(Long runId, Long stepId, String code, String message) {
+    }
+
+    /** P14-C：报告真实写入 reports 表后发送，reportId 可经详情接口鉴权访问。 */
+    public record ReportReady(Long runId, Long stepId, Long reportId, String title) {
+    }
 }

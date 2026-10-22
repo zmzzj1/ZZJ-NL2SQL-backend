@@ -3,7 +3,9 @@ package com.queryforge.application.agent;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -109,6 +111,23 @@ class AgentRunServiceP14ATest {
     private AgentRunToolPolicy toolPolicy;
     @Mock
     private ToolOutputSanitizer toolOutputSanitizer;
+    @Mock
+    private com.queryforge.application.agent.sql.SqlCandidateSelectionService selectionService;
+
+    @Mock
+    private AgentPythonAssistant pythonAssistant;
+
+    @Mock
+    private com.queryforge.application.agent.roles.CodeAnalystAgent codeAnalyst;
+
+    @Mock
+    private com.queryforge.application.report.ReportService reportService;
+
+    @Mock
+    private AgentReportComposer reportComposer;
+
+    @Mock
+    private com.queryforge.application.analysis.AnalysisService analysisService;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private AgentStepEngine engine;
@@ -128,12 +147,15 @@ class AgentRunServiceP14ATest {
                 repository, conversationService, connectionService, planner, sqlAssistant,
                 executionService, guard, properties, managerRouter, graphStateService,
                 roleAssigner, approvalSessionStore, contextAssembler, failureHandler,
-                planState, roleRecorder, llmLimiter, toolAssistant, toolPolicy, toolOutputSanitizer);
+                planState, roleRecorder, llmLimiter, toolAssistant, toolPolicy, toolOutputSanitizer,
+                selectionService, pythonAssistant, codeAnalyst, reportService, reportComposer,
+                analysisService);
         service = new AgentRunService(
                 repository, conversationService, connectionService, sqlAssistant, objectMapper,
                 knowledgeService, configResolver, graphStateService, approvalSessionStore,
                 engine, contextAssembler, failureHandler, planState, roleRecorder, llmLimiter,
                 new ToolInvocationRequestGuard());
+        lenient().when(repository.tryIncrementLlmCalls(anyLong(), anyInt())).thenReturn(1);
     }
 
     private void stubCommon() {
@@ -335,7 +357,7 @@ class AgentRunServiceP14ATest {
         when(repository.findStep(RUN_ID, STEP_ID)).thenReturn(Optional.of(new com.queryforge.domain.agent.AgentStep(
                 STEP_ID, RUN_ID, 1, "调用工具 describe_schema", null, StepStatus.SUCCEEDED, null, 0,
                 "TOOL_ASSISTANT", com.queryforge.domain.agent.ApprovalStatus.PENDING, 0,
-                null, null, null, null, "{\"tables\":[]}", NOW, NOW)));
+                null, null, null, null, "{\"tables\":[]}", NOW, NOW, null, null)));
 
         String output = start(preparedWithTool("describe_schema", Map.of()));
 
@@ -372,13 +394,16 @@ class AgentRunServiceP14ATest {
         when(planner.plan(anyString(), anyString(), anyString()))
                 .thenReturn(new com.queryforge.domain.agent.AgentPlan(
                         true, "", List.of(new com.queryforge.domain.agent.AgentPlan.Step(QUESTION))));
-        when(repository.insertStep(RUN_ID, 1, QUESTION, null)).thenReturn(STEP_ID);
+        when(repository.insertStep(RUN_ID, 1, QUESTION, null, "DATA_ANALYST")).thenReturn(STEP_ID);
         when(repository.findSteps(RUN_ID)).thenReturn(List.of(new com.queryforge.domain.agent.AgentStep(
                 STEP_ID, RUN_ID, 1, QUESTION, null, StepStatus.PENDING, null, 0, "SQL_AGENT",
-                com.queryforge.domain.agent.ApprovalStatus.PENDING, 0, null, null, null, null, null, NOW, NOW)));
+                com.queryforge.domain.agent.ApprovalStatus.PENDING, 0, null, null, null, null, null, NOW, NOW,
+                null, null)));
         when(roleAssigner.assign(anyString())).thenReturn(AgentRole.DATA_ANALYST);
-        when(sqlAssistant.generateSql(anyString(), anyString(), anyString(), anyString(), anyString(), anyString(),
-                anyString())).thenReturn("SELECT COUNT(*) AS c FROM shop_orders");
+        when(selectionService.generateAndSelect(
+                any(com.queryforge.application.agent.sql.SqlSelectionRequest.class)))
+                .thenReturn(new com.queryforge.application.agent.sql.SqlSelection(
+                        "MULTI", "SELECT COUNT(*) AS c FROM shop_orders", 1, 3, 1, 0.998, 0.8, 0.879, false));
         when(guard.validate(anyString(), anyString())).thenReturn("SELECT COUNT(*) AS c FROM shop_orders");
 
         String output = start(prepared());

@@ -1,6 +1,7 @@
 package com.queryforge.application.analysis;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.queryforge.domain.query.ExecuteSqlRequest;
 import com.queryforge.domain.query.QueryResultResponse;
@@ -96,23 +97,38 @@ public class AnalysisService {
                 queryHistoryId, sourceSql, engine.name(),
                 Math.min(result.rows().size(), properties.maxInputRows()), properties.maxInputBytes());
 
+        boolean failureRecorded = false;
         try {
             Trimmed trimmed = trim(result);
             long startedAt = System.nanoTime();
             AnalysisEngine.AnalysisResult analysis = engine.run(code, trimmed.columns(), trimmed.rows());
             long durationMs = (System.nanoTime() - startedAt) / 1_000_000;
 
+            // P14-C：退出码非零（含超时/被杀）必须落失败，不能先 completeRun 再显示失败徽标。
+            if (analysis.exitCode() != 0) {
+                String message = safe(analysis.summary());
+                repository.failRun(runId, "ANALYSIS_EXECUTION_ERROR", message, analysis.stderrTail(), durationMs);
+                failureRecorded = true;
+                throw new ApiException(
+                        ErrorCode.ANALYSIS_EXECUTION_ERROR, HttpStatus.UNPROCESSABLE_ENTITY, message);
+            }
+
             repository.completeRun(runId, analysis.stdoutTail(), analysis.stderrTail(), analysis.exitCode(), durationMs);
-            String chartsJson = objectMapper.writeValueAsString(analysis.charts());
+            // 工件同时保存 charts 与 summary，保证跨请求（Report 步骤）可读回真实摘要。
+            String artifactJson = objectMapper.writeValueAsString(
+                    new AnalysisArtifactPayload(analysis.charts(), analysis.summary()));
             repository.insertArtifact(runId, userId, ARTIFACT_KIND, MIME_JSON,
-                    chartsJson.getBytes(StandardCharsets.UTF_8).length, chartsJson);
+                    artifactJson.getBytes(StandardCharsets.UTF_8).length, artifactJson);
             return toResponse(repository.findOwned(runId, userId).orElseThrow(), analysis.charts(), analysis.summary());
         } catch (AnalysisExecutionException ex) {
             repository.failRun(runId, "ANALYSIS_EXECUTION_ERROR", safe(ex.getMessage()), "", 0);
             throw new ApiException(
                     ErrorCode.ANALYSIS_EXECUTION_ERROR, HttpStatus.UNPROCESSABLE_ENTITY, safe(ex.getMessage()));
         } catch (ApiException ex) {
-            repository.failRun(runId, ex.getErrorCode().name(), safe(ex.getMessage()), "", 0);
+            // 已在分支内落过失败（带真实退出码与耗时）的不再重复写，避免覆盖诊断信息。
+            if (!failureRecorded) {
+                repository.failRun(runId, ex.getErrorCode().name(), safe(ex.getMessage()), "", 0);
+            }
             throw ex;
         } catch (IOException ex) {
             repository.failRun(runId, "ANALYSIS_EXECUTION_ERROR", "分析结果序列化失败", "", 0);
@@ -126,8 +142,8 @@ public class AnalysisService {
 
     public AnalysisRunResponse detail(Long userId, Long id) {
         AnalysisRepository.AnalysisRun run = requireOwned(userId, id);
-        List<ChartSchema.TypedChart> charts = readCharts(id, userId);
-        return toResponse(run, charts, charts.isEmpty() ? null : null);
+        AnalysisArtifactPayload payload = readArtifact(id, userId);
+        return toResponse(run, payload.charts(), payload.summary());
     }
 
     public void cancel(Long userId, Long id) {
@@ -143,22 +159,46 @@ public class AnalysisService {
         return new Trimmed(result.columns(), rows);
     }
 
-    private List<ChartSchema.TypedChart> readCharts(Long analysisRunId, Long userId) {
+    /**
+     * 读取分析工件。兼容两种历史格式：旧版为纯图表 JSON 数组，P14-C 起为
+     * {@code {"charts":[...],"summary":"..."}} 包装；解析失败按空工件处理（不冒充成功）。
+     */
+    private AnalysisArtifactPayload readArtifact(Long analysisRunId, Long userId) {
         return repository.findArtifacts(analysisRunId, userId).stream()
                 .filter(artifact -> ARTIFACT_KIND.equals(artifact.kind()))
                 .findFirst()
-                .map(artifact -> parseCharts(artifact.content()))
-                .orElse(List.of());
+                .map(artifact -> parseArtifact(artifact.content()))
+                .orElseGet(AnalysisArtifactPayload::empty);
     }
 
-    private List<ChartSchema.TypedChart> parseCharts(String json) {
+    private AnalysisArtifactPayload parseArtifact(String json) {
+        if (json == null || json.isBlank()) {
+            return AnalysisArtifactPayload.empty();
+        }
         try {
-            return objectMapper.readValue(json, new TypeReference<List<ChartSchema.TypedChart>>() {
-            });
+            JsonNode node = objectMapper.readTree(json);
+            if (node.isArray()) {
+                return new AnalysisArtifactPayload(parseCharts(node), null);
+            }
+            if (node.isObject()) {
+                JsonNode summary = node.path("summary");
+                return new AnalysisArtifactPayload(
+                        parseCharts(node.path("charts")),
+                        summary.isTextual() ? summary.asText() : null);
+            }
+            return AnalysisArtifactPayload.empty();
         } catch (IOException ex) {
             log.warn("analysis_chart_parse_failed message={}", ex.getMessage());
+            return AnalysisArtifactPayload.empty();
+        }
+    }
+
+    private List<ChartSchema.TypedChart> parseCharts(JsonNode node) throws IOException {
+        if (node == null || !node.isArray()) {
             return List.of();
         }
+        return objectMapper.convertValue(node, new TypeReference<List<ChartSchema.TypedChart>>() {
+        });
     }
 
     private AnalysisRepository.AnalysisRun requireOwned(Long userId, Long id) {
@@ -201,5 +241,13 @@ public class AnalysisService {
     }
 
     private record Trimmed(List<String> columns, List<Map<String, Object>> rows) {
+    }
+
+    /** 分析工件内容：真实图表 + 真实摘要（均可跨请求读回）。 */
+    private record AnalysisArtifactPayload(List<ChartSchema.TypedChart> charts, String summary) {
+
+        static AnalysisArtifactPayload empty() {
+            return new AnalysisArtifactPayload(List.of(), null);
+        }
     }
 }

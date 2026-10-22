@@ -33,7 +33,7 @@ public class AgentRunRepository {
     private static final String STEP_COLUMNS = """
             id, run_id, sequence, objective, depends_on, status, sql_text, sql_version, agent_role,
             approval_status, repair_count, row_count, truncated, error_code, error_message,
-            result_summary, created_at, updated_at
+            result_summary, created_at, updated_at, analysis_run_id, report_id
             """;
 
     private final JdbcTemplate jdbcTemplate;
@@ -158,6 +158,76 @@ public class AgentRunRepository {
                 StepStatus.RUNNING.name());
     }
 
+    /**
+     * P14-C：非 SQL 步骤（Code/Report）原子进入执行态。
+     * 匹配 runId + stepId + PENDING，重复触发（SSE 重连/前端双击）不会二次执行。
+     */
+    public int claimNonSqlStep(Long runId, Long stepId) {
+        return jdbcTemplate.update("""
+                        UPDATE agent_steps SET status = ?, updated_at = ?
+                        WHERE id = ? AND run_id = ? AND status = ?
+                        """,
+                StepStatus.RUNNING.name(),
+                LocalDateTime.now(),
+                stepId,
+                runId,
+                StepStatus.PENDING.name());
+    }
+
+    /** P14-C：Code 步骤成功落库：挂真实 analysisRunId 与安全摘要（仅 RUNNING → SUCCEEDED）。 */
+    public int completeCodeStep(Long runId, Long stepId, Long analysisRunId, String resultSummary) {
+        return jdbcTemplate.update("""
+                        UPDATE agent_steps
+                        SET status = ?, result_summary = ?, analysis_run_id = ?,
+                            error_code = NULL, error_message = NULL, updated_at = ?
+                        WHERE id = ? AND run_id = ? AND status = ?
+                        """,
+                StepStatus.SUCCEEDED.name(),
+                resultSummary,
+                analysisRunId,
+                LocalDateTime.now(),
+                stepId,
+                runId,
+                StepStatus.RUNNING.name());
+    }
+
+    /** P14-C：Report 步骤成功落库：挂真实 reportId 与安全摘要（仅 RUNNING → SUCCEEDED）。 */
+    public int completeReportStep(Long runId, Long stepId, Long reportId, String resultSummary) {
+        return jdbcTemplate.update("""
+                        UPDATE agent_steps
+                        SET status = ?, result_summary = ?, report_id = ?,
+                            error_code = NULL, error_message = NULL, updated_at = ?
+                        WHERE id = ? AND run_id = ? AND status = ?
+                        """,
+                StepStatus.SUCCEEDED.name(),
+                resultSummary,
+                reportId,
+                LocalDateTime.now(),
+                stepId,
+                runId,
+                StepStatus.RUNNING.name());
+    }
+
+    /**
+     * P14-C：非 SQL 步骤失败落库（匹配 runId + stepId + 预期状态）。
+     * 已终结 Run 的迟到回调因状态不匹配而写不进去，不会把成功改写成失败。
+     */
+    public int failNonSqlStep(Long runId, Long stepId, String errorCode, String errorMessage) {
+        return jdbcTemplate.update("""
+                        UPDATE agent_steps
+                        SET status = ?, error_code = ?, error_message = ?, updated_at = ?
+                        WHERE id = ? AND run_id = ? AND status IN (?, ?)
+                        """,
+                StepStatus.FAILED.name(),
+                errorCode,
+                errorMessage,
+                LocalDateTime.now(),
+                stepId,
+                runId,
+                StepStatus.PENDING.name(),
+                StepStatus.RUNNING.name());
+    }
+
     public Optional<AgentRun> findRunOwned(Long runId, Long userId) {
         List<AgentRun> rows = jdbcTemplate.query(
                 "SELECT " + RUN_COLUMNS + " FROM agent_runs WHERE id = ? AND user_id = ?",
@@ -237,10 +307,17 @@ public class AgentRunRepository {
                 sourcesJson, LocalDateTime.now(), runId);
     }
 
-    public int incrementLlmCalls(Long runId) {
+    /**
+     * P14-B：原子占用一次模型调用预算（条件更新，多候选并行不超额）。
+     * 这是平台自身元数据的计数更新，不是模型生成 SQL，也不走外部连接只读查询。
+     *
+     * @return 1 表示占用成功；0 表示已达上限或运行不存在
+     */
+    public int tryIncrementLlmCalls(Long runId, int maxCalls) {
         return jdbcTemplate.update(
-                "UPDATE agent_runs SET llm_call_count = llm_call_count + 1, updated_at = ? WHERE id = ?",
-                LocalDateTime.now(), runId);
+                "UPDATE agent_runs SET llm_call_count = llm_call_count + 1, updated_at = ? "
+                        + "WHERE id = ? AND llm_call_count < ?",
+                LocalDateTime.now(), runId, maxCalls);
     }
 
     public int updateRunStatus(Long runId, RunStatus status, String summary, String errorCode, String errorMessage) {
@@ -416,6 +493,10 @@ public class AgentRunRepository {
         Integer nullableRowCount = resultSet.wasNull() ? null : rowCount;
         boolean truncated = resultSet.getBoolean("truncated");
         Boolean nullableTruncated = resultSet.wasNull() ? null : truncated;
+        long analysisRunId = resultSet.getLong("analysis_run_id");
+        Long nullableAnalysisRunId = resultSet.wasNull() ? null : analysisRunId;
+        long reportId = resultSet.getLong("report_id");
+        Long nullableReportId = resultSet.wasNull() ? null : reportId;
         return new AgentStep(
                 resultSet.getLong("id"),
                 resultSet.getLong("run_id"),
@@ -434,7 +515,9 @@ public class AgentRunRepository {
                 resultSet.getString("error_message"),
                 resultSet.getString("result_summary"),
                 resultSet.getTimestamp("created_at").toLocalDateTime(),
-                resultSet.getTimestamp("updated_at").toLocalDateTime());
+                resultSet.getTimestamp("updated_at").toLocalDateTime(),
+                nullableAnalysisRunId,
+                nullableReportId);
     }
 
     /** 写入/更新统一状态图检查点（P11）。state_revision 用作乐观并发保护。 */

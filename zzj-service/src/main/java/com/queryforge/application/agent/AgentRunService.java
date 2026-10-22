@@ -227,8 +227,10 @@ public class AgentRunService {
                     graphStateService.enter(run.runId(), GraphNode.PLANNING, writer);
                     graphStateService.enter(run.runId(), GraphNode.CONTEXT_BUILDING, writer);
                     graphStateService.enter(run.runId(), GraphNode.RUNNING, writer);
+                    // P14-C：SIMPLE 恒为取数步骤，避免推断角色把单步查询误判成分析/报告。
                     AgentPlan plan = new AgentPlan(
-                            true, "", List.of(new AgentPlan.Step(truncate(run.question(), 300))));
+                            true, "", List.of(new AgentPlan.Step(
+                                    truncate(run.question(), 300), "DATA_ANALYST", null)));
                     engine.executePlan(run, schema, plan, writer, context);
                 }
                 case COMPLEX, MEDIUM -> {
@@ -252,7 +254,14 @@ public class AgentRunService {
             failureHandler.cancelRunQuietly(run.userId(), run.runId());
         } catch (RuntimeException ex) {
             log.warn("agent_plan_failed runId={} message={}", run.runId(), ex.getMessage());
-            failureHandler.failRunWithEventQuietly(run.runId(), "AGENT_PLAN_FAILED", "规划失败，请稍后重试", writer);
+            // P14-C：计划本身不合法（角色/依赖越界）时保留精确错误码，便于前端区分与定位。
+            boolean planInvalid = ex instanceof ApiException apiException
+                    && apiException.getErrorCode() == ErrorCode.AGENT_PLAN_INVALID;
+            String code = planInvalid ? "AGENT_PLAN_INVALID" : "AGENT_PLAN_FAILED";
+            String message = planInvalid && ex.getMessage() != null && !ex.getMessage().isBlank()
+                    ? ex.getMessage()
+                    : "规划失败，请稍后重试";
+            failureHandler.failRunWithEventQuietly(run.runId(), code, message, writer);
         } finally {
             ModelRouteContextHolder.clear();
         }
@@ -350,10 +359,12 @@ public class AgentRunService {
                         step.id(), step.rowCount() == null ? 0 : step.rowCount(),
                         Boolean.TRUE.equals(step.truncated()),
                         step.resultSummary() == null ? "" : step.resultSummary()));
+                // P14-C：幂等重放时继续推进剩余就绪步骤（跨请求恢复，不重复执行 SQL）。
+                engine.advanceAfterApprovedStep(approval, null, writer);
                 return;
             }
-            engine.executeAndContinue(approval, writer);
-            engine.advanceAfterStep(approval, writer);
+            ApprovedSqlOutcome outcome = engine.executeAndContinue(approval, writer);
+            engine.advanceAfterApprovedStep(approval, outcome, writer);
         } catch (IOException ex) {
             log.info("agent_client_closed runId={} stepId={}", run.id(), step.id());
             failureHandler.markInterrupted(run.id(), step.id());
@@ -469,7 +480,8 @@ public class AgentRunService {
         return new AgentStepResponse(
                 step.id(), step.sequence(), step.objective(), step.dependsOn(), step.status(),
                 step.sql(), step.sqlVersion(), step.agentRole(), step.approvalStatus(), step.repairCount(),
-                step.rowCount(), step.truncated(), step.errorCode(), step.errorMessage(), step.resultSummary());
+                step.rowCount(), step.truncated(), step.errorCode(), step.errorMessage(), step.resultSummary(),
+                step.analysisRunId(), step.reportId());
     }
 
     private static ApiException conflict(String message) {

@@ -5,6 +5,7 @@ import com.queryforge.infrastructure.llm.LlmTextCollector;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import com.queryforge.domain.agent.AgentPrompts;
+import java.util.List;
 
 /**
  * Agent 的 SQL 生成、修复与结果总结。所有输出在使用前仍要经过 ReadOnlySqlGuard。
@@ -52,6 +53,37 @@ public class AgentSqlAssistant {
     }
 
     /**
+     * P14-B：生成第 {@code candidateIndex} 个候选 SQL。与单路径共用同一份受控上下文与
+     * 平台硬性安全指令；{@code strategy} 只改变表达策略。输出仍需 Guard 校验。
+     */
+    public String generateCandidateSql(
+            String objective, String schema, String previousSummaries, String knowledge,
+            String customSystemPrompt, String skillGuidance, String effectiveContext,
+            int candidateIndex, String strategy, String dialect) {
+        String system = buildCandidateSystem(customSystemPrompt);
+        String raw = LlmTextCollector.collect(
+                llmClient.openChat(
+                        system,
+                        AgentPrompts.sqlCandidateUser(
+                                objective, schema, previousSummaries, knowledge, skillGuidance,
+                                effectiveContext, candidateIndex, strategy, dialect)),
+                objectMapper);
+        return sanitizeSql(raw);
+    }
+
+    /**
+     * P14-B：候选评分原文（JSON 数组文本）。解析、越界/重复拒绝与规则降级由
+     * {@code SqlCandidateScorer} 负责；本方法不做任何兜底改写。
+     */
+    public String scoreCandidates(String objective, String schema, List<String> candidates) {
+        return LlmTextCollector.collect(
+                llmClient.openChat(
+                        AgentPrompts.SQL_SCORER_SYSTEM,
+                        AgentPrompts.sqlScorerUser(objective, schema, candidates)),
+                objectMapper);
+    }
+
+    /**
      * P14-A：闲聊自然语言回答。使用受控 system 提示，不生成 SQL/Python/JSON/报告，
      * 不访问数据库或工具。空响应返回空串，由调用方决定兜底策略。
      */
@@ -74,6 +106,15 @@ public class AgentSqlAssistant {
             return AgentPrompts.SQL_SYSTEM;
         }
         return AgentPrompts.SQL_SYSTEM + "\n\n补充要求（不得违反上述硬性安全约束）：\n" + customSystemPrompt;
+    }
+
+    /** P14-B：候选生成的系统提示同样保留平台硬性约束，自定义提示词只作补充。 */
+    private static String buildCandidateSystem(String customSystemPrompt) {
+        if (customSystemPrompt == null || customSystemPrompt.isBlank()) {
+            return AgentPrompts.SQL_CANDIDATE_SYSTEM;
+        }
+        return AgentPrompts.SQL_CANDIDATE_SYSTEM
+                + "\n\n补充要求（不得违反上述硬性安全约束）：\n" + customSystemPrompt;
     }
 
     public String knowledgeAnswer(String question, String knowledge) {

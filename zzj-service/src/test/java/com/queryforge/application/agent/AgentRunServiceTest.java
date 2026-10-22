@@ -14,6 +14,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -130,6 +131,24 @@ class AgentRunServiceTest {
     @Mock
     private com.queryforge.application.tool.ToolOutputSanitizer toolOutputSanitizer;
 
+    @Mock
+    private com.queryforge.application.agent.sql.SqlCandidateSelectionService selectionService;
+
+    @Mock
+    private AgentPythonAssistant pythonAssistant;
+
+    @Mock
+    private com.queryforge.application.agent.roles.CodeAnalystAgent codeAnalyst;
+
+    @Mock
+    private com.queryforge.application.report.ReportService reportService;
+
+    @Mock
+    private AgentReportComposer reportComposer;
+
+    @Mock
+    private com.queryforge.application.analysis.AnalysisService analysisService;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private AgentStepEngine engine;
     private AgentRunService service;
@@ -149,13 +168,17 @@ class AgentRunServiceTest {
                 repository, conversationService, connectionService, planner, sqlAssistant,
                 executionService, guard, properties, managerRouter, graphStateService,
                 roleAssigner, approvalSessionStore, contextAssembler, failureHandler,
-                planState, roleRecorder, llmLimiter, toolAssistant, toolPolicy, toolOutputSanitizer);
+                planState, roleRecorder, llmLimiter, toolAssistant, toolPolicy, toolOutputSanitizer,
+                selectionService, pythonAssistant, codeAnalyst, reportService, reportComposer,
+                analysisService);
         service = new AgentRunService(
                 repository, conversationService, connectionService, sqlAssistant, objectMapper,
                 knowledgeService, configResolver, graphStateService, approvalSessionStore,
                 engine, contextAssembler, failureHandler, planState, roleRecorder, llmLimiter,
                 new com.queryforge.application.agent.ToolInvocationRequestGuard());
         org.mockito.Mockito.lenient().when(roleAssigner.assign(anyString())).thenReturn(AgentRole.DATA_ANALYST);
+        org.mockito.Mockito.lenient()
+                .when(repository.tryIncrementLlmCalls(anyLong(), anyInt())).thenReturn(1);
     }
 
     @Test
@@ -183,9 +206,9 @@ class AgentRunServiceTest {
     @DisplayName("规划成功后展示计划并生成第一步 SQL，等待用户确认")
     void startRun_shouldEmitPlanAndFirstApproval() throws Exception {
         stubPlan(1);
-        when(sqlAssistant.generateSql(
-                eq(QUESTION), eq(SCHEMA), anyString(), anyString(), anyString(), anyString(), anyString()))
-                .thenReturn(SQL);
+        when(selectionService.generateAndSelect(any(com.queryforge.application.agent.sql.SqlSelectionRequest.class)))
+                .thenReturn(new com.queryforge.application.agent.sql.SqlSelection(
+                        "SINGLE", SQL, 1, 1, 1, 0.0, 0.0, 0.0, false));
         when(guard.validate(SQL, "sql_demo_a")).thenReturn(SQL);
 
         String output = start(prepared());
@@ -224,9 +247,9 @@ class AgentRunServiceTest {
     @DisplayName("生成期 SQL Guard 拒绝时步骤与运行都失败")
     void startRun_shouldFailWhenGuardRejects() throws Exception {
         stubPlan(1);
-        when(sqlAssistant.generateSql(
-                eq(QUESTION), eq(SCHEMA), anyString(), anyString(), anyString(), anyString(), anyString()))
-                .thenReturn(SQL);
+        when(selectionService.generateAndSelect(any(com.queryforge.application.agent.sql.SqlSelectionRequest.class)))
+                .thenReturn(new com.queryforge.application.agent.sql.SqlSelection(
+                        "SINGLE", SQL, 1, 1, 1, 0.0, 0.0, 0.0, false));
         when(guard.validate(SQL, "sql_demo_a")).thenThrow(
                 new ApiException(ErrorCode.SQL_NOT_ALLOWED, HttpStatus.BAD_REQUEST, "只允许只读 SELECT"));
 
@@ -301,7 +324,7 @@ class AgentRunServiceTest {
     void executeApproval_shouldReplayWithoutExecuting() throws Exception {
         AgentStep succeeded = new AgentStep(
                 STEP_ID, RUN_ID, 1, QUESTION, null, StepStatus.SUCCEEDED, SQL, 1, "SQL_AGENT",
-                ApprovalStatus.APPROVED, 0, 1, false, null, null, "返回 1 行", NOW, NOW);
+                ApprovalStatus.APPROVED, 0, 1, false, null, null, "返回 1 行", NOW, NOW, null, null);
         AgentRun run = run(RunStatus.COMPLETED);
         when(connectionService.summary(USER_ID, CONNECTION_ID))
                 .thenReturn(new ConnectionService.ConnectionSummary(CONNECTION_ID, "A 商店库", "sql_demo_a"));
@@ -433,14 +456,14 @@ class AgentRunServiceTest {
                 .toList();
         when(planner.plan(eq(QUESTION), eq(SCHEMA), anyString())).thenReturn(new AgentPlan(true, "", planSteps));
         for (int index = 1; index <= stepCount; index++) {
-            when(repository.insertStep(RUN_ID, index, QUESTION, index == 1 ? null : index - 1))
+            when(repository.insertStep(RUN_ID, index, QUESTION, index == 1 ? null : index - 1, "DATA_ANALYST"))
                     .thenReturn(STEP_ID + index - 1);
         }
         List<AgentStep> steps = java.util.stream.IntStream.rangeClosed(1, stepCount)
                 .mapToObj(index -> new AgentStep(
                         STEP_ID + index - 1, RUN_ID, index, QUESTION, index == 1 ? null : index - 1,
                         StepStatus.PENDING, null, 0, "SQL_AGENT", ApprovalStatus.PENDING, 0,
-                        null, null, null, null, null, NOW, NOW))
+                        null, null, null, null, null, NOW, NOW, null, null))
                 .toList();
         when(repository.findSteps(RUN_ID)).thenReturn(steps);
     }
@@ -471,7 +494,7 @@ class AgentRunServiceTest {
     private static AgentStep step(StepStatus status, String sql, int version, int repairCount) {
         return new AgentStep(
                 STEP_ID, RUN_ID, 1, QUESTION, null, status, sql, version, "SQL_AGENT",
-                ApprovalStatus.PENDING, repairCount, null, null, null, null, null, NOW, NOW);
+                ApprovalStatus.PENDING, repairCount, null, null, null, null, null, NOW, NOW, null, null);
     }
 
     private static QueryResultResponse result() {
