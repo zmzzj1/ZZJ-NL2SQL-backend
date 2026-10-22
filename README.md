@@ -1,12 +1,13 @@
 # QueryForge 后端（真实用户与多数据源）
 
-Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性；P10 新增工作流定时调度与安全 CSV 导出；P11 新增统一 Agent 执行内核；P13 将公开入口拆为 Gateway，并新增通过 Dubbo 查询核心业务数据的独立 Admin 服务。
+Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性；P10 新增工作流定时调度与安全 CSV 导出；P11 新增统一 Agent 执行内核；P13 将公开入口拆为 Gateway，新增通过 Dubbo 查询核心业务数据的独立 Admin 服务，并把 Docker Python 隔离执行下沉为可复用 Sandbox 模块。
 
 ## 环境要求
 
 - JDK 21（验证使用 Temurin 21.0.12.1）
 - Maven 3.9+（验证使用 3.9.1）
 - MySQL 8（验证使用 8.4.11）
+- 可选：Docker 运行时（执行模型生成的 Python 分析代码；不可用时失败关闭，不回退宿主机）
 - 可选：OpenAI 兼容模型服务
 
 ## 主要能力
@@ -16,7 +17,7 @@ Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL �
 - Manager 结构化路由、多角色轨迹和 LLM 调用次数限制。
 - 业务知识 CRUD、按连接鉴权检索和会话记忆摘要。
 - 受控工具注册表（只读工具 + 审计）、真实 MCP stdio 客户端（预配置白名单服务）。
-- 隔离 Python 数据分析（Docker 沙箱，不可用时拒绝回退宿主机）、内置确定性分析器。
+- 隔离 Python 数据分析：`zzj-sandbox` 以普通 JAR 提供一次性 Docker 容器、非 root、禁网、只读根、资源/时间/输出限制和强制清理；运行时不可用时拒绝回退宿主机。另含内置确定性分析器。
 - 结构化图表（table/bar/line/pie）与净化 HTML 报告（CSP + 沙箱预览）。
 - 可视化工作流 DAG（校验、版本化、串行执行、SQL 审批暂停/恢复、SSE）。
 - 工作流定时调度：Cron/时区校验、未来时间预览、启停、幂等触发、数据库租约、misfire/overlap 策略；含 SQL 的运行仍停在审批边界。
@@ -112,13 +113,14 @@ Spring 属性（通过 `--app.*=value` 或外部配置传入）：
 
 ## 启动与测试
 
-P13 起本目录是 Maven 聚合父工程（`packaging=pom`），包含四个子模块：
+P13 起本目录是 Maven 聚合父工程（`packaging=pom`），包含五个子模块：
 
 | 模块 | 端口 | 说明 |
 | --- | --- | --- |
 | `zzj-service` | 8081（仅回环） | 全部既有核心业务（SQL/Agent/Workflow/RAG/Memory/Studio/认证），注册到 Nacos |
 | `zzj-gateway` | 8080 | 公开接入层：WebFlux Gateway + Nacos Discovery + LoadBalancer，转发 `/api/**` 到 `lb://zzj-service` |
 | `zzj-common` | 不监听端口 | Admin 与 Service 共享的最小 Dubbo 接口和可序列化 DTO |
+| `zzj-sandbox` | 不监听端口 | 可复用的 Docker Python 隔离执行能力；普通 JAR，不依赖 Spring、Nacos、Dubbo、数据库或认证 |
 | `zzj-admin` | 8083 | 独立管理查询服务；校验共享登录会话并经 Dubbo 调用 `zzj-service` |
 
 前端 `/api` 仍然指向 8080（Vite 代理不变），因此页面代码无需改动；8080 现在是网关而不是业务进程。
@@ -253,6 +255,7 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn s
 
 ## 测试
 
+- P13-M4 全量验证：`mvn verify` 共 432 个自动化用例（`zzj-common` 6 个、`zzj-sandbox` 8 个、`zzj-service` 366 个、`zzj-gateway` 38 个、`zzj-admin` 14 个；0 failures/0 errors/17 skipped，2026-10-22 实跑）。其中 5 个真实 Docker 安全/资源探针因当前 Docker 守护进程不可访问而如实跳过，其余跳过项为缺少对应外部测试条件的集成测试。
 - P13-M2 全量基线：`mvn verify` 共 384 个自动化用例（`zzj-service` 350 个、`zzj-gateway` 34 个；0 failures/0 errors/12 skipped，2026-10-22 实跑）；跳过项均为缺少对应外部测试环境时主动跳过的集成测试。
 - P13-M3A 定向验证：Admin 契约、Provider、Gateway 路由、共享会话、Dubbo Consumer 和 Controller 共 32 个用例通过；可用 `mvn -pl zzj-admin -am -Dtest=AdminContractTest,AdminSessionServiceTest,AdminQueryRpcClientTest,AdminQueryControllerTest -Dsurefire.failIfNoSpecifiedTests=false test` 快速复测 Admin 侧。
 - P13-M3B 定向验证：上述 32 个管理模块用例通过；真实 Gateway → Admin → Dubbo → Service → MySQL 联调覆盖管理权限、账号状态、会话失效、用户配额和路由隔离，23/23 通过。

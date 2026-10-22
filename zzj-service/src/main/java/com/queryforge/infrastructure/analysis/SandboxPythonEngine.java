@@ -1,42 +1,48 @@
 package com.queryforge.infrastructure.analysis;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.TimeUnit;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Component;
-import com.queryforge.domain.analysis.AnalysisEngine.AnalysisResult;
 import com.queryforge.domain.analysis.AnalysisEngine;
+import com.queryforge.domain.analysis.AnalysisEngine.AnalysisResult;
 import com.queryforge.domain.analysis.AnalysisExecutionException;
 import com.queryforge.domain.analysis.AnalysisProperties;
 import com.queryforge.domain.analysis.ChartSchema;
+import com.zzj.sandbox.SandboxErrorCategory;
+import com.zzj.sandbox.SandboxException;
+import com.zzj.sandbox.SandboxExecutor;
+import com.zzj.sandbox.SandboxLimits;
+import com.zzj.sandbox.SandboxRequest;
+import com.zzj.sandbox.SandboxResult;
+import java.util.List;
+import java.util.Map;
+import org.springframework.stereotype.Component;
 
 /**
- * 隔离 Python 沙箱：模型生成的 Python 代码只在一次性 Docker 容器内执行，
- * 非 root、禁网络、只读根、去 capabilities、内存/CPU/时间/输出限额、一次性临时目录。
- * 控制面不拼接用户参数到 docker 命令（全部通过参数列表传递），不暴露宿主目录/凭据/网络。
- * Docker 守护进程不可用时 available()==false，调用方不得回退到宿主机执行。
+ * 隔离 Python 沙箱适配器（P13-M4）：保留 {@link AnalysisEngine} 业务契约，
+ * 只负责把 {@link AnalysisProperties}/业务输入转成 {@link SandboxRequest}、调用 {@link SandboxExecutor}、
+ * 并把受控结构化 JSON 解析为原有 {@link ChartSchema} 图表/摘要。
+ *
+ * <p>Docker 进程管理、资源限制、超时与清理已下沉到 {@code zzj-sandbox} 模块；此处不再直接管理容器。
+ * 安全行为不变：模型生成的代码只在隔离容器执行，Docker 不可用时拒绝执行（见 {@link AnalysisService} 的
+ * {@code ANALYSIS_SANDBOX_UNAVAILABLE} 门禁），绝不回退宿主机。</p>
  */
 @Component
 public class SandboxPythonEngine implements AnalysisEngine {
 
-    private static final Logger log = LoggerFactory.getLogger(SandboxPythonEngine.class);
-    private static final int MAX_STDOUT_BYTES = 64 * 1024;
     private static final int MAX_TAIL_CHARS = 2000;
+    private static final int PIDS_LIMIT = 64;
+    private static final int MAX_STDOUT_BYTES = 64 * 1024;
+    private static final long MAX_OUTPUT_BYTES = 1024L * 1024;
 
     private final AnalysisProperties properties;
     private final ObjectMapper objectMapper;
+    private final SandboxExecutor sandboxExecutor;
 
-    public SandboxPythonEngine(AnalysisProperties properties, ObjectMapper objectMapper) {
+    public SandboxPythonEngine(AnalysisProperties properties, ObjectMapper objectMapper,
+                               SandboxExecutor sandboxExecutor) {
         this.properties = properties;
         this.objectMapper = objectMapper;
+        this.sandboxExecutor = sandboxExecutor;
     }
 
     @Override
@@ -46,7 +52,7 @@ public class SandboxPythonEngine implements AnalysisEngine {
 
     @Override
     public boolean available() {
-        return dockerInfo() != null;
+        return sandboxExecutor.available();
     }
 
     @Override
@@ -55,130 +61,47 @@ public class SandboxPythonEngine implements AnalysisEngine {
         if (!available()) {
             throw new AnalysisExecutionException("隔离沙箱运行时不可用（Docker 未就绪）");
         }
-        Path workDir = createWorkDir();
         try {
-            Path input = workDir.resolve("input.json");
-            Path codeFile = workDir.resolve("main.py");
-            Path output = workDir.resolve("output.json");
-            writeJson(input, new SandboxInput(columns, rows));
-            Files.writeString(codeFile, code, StandardCharsets.UTF_8);
+            String inputJson;
+            try {
+                inputJson = objectMapper.writeValueAsString(new SandboxInput(columns, rows));
+            } catch (JsonProcessingException ex) {
+                throw new AnalysisExecutionException("沙箱输入序列化失败", ex);
+            }
+            SandboxRequest request = new SandboxRequest(code, inputJson);
+            SandboxLimits limits = new SandboxLimits(
+                    properties.sandboxImage(),
+                    properties.sandboxCommand(),
+                    properties.timeoutSeconds(),
+                    properties.memoryBytes(),
+                    properties.cpus(),
+                    PIDS_LIMIT,
+                    MAX_STDOUT_BYTES,
+                    MAX_OUTPUT_BYTES);
 
-            List<String> command = buildCommand(workDir, input, codeFile, output);
-            ProcessResult result = runContainer(command, workDir);
+            SandboxResult result = sandboxExecutor.execute(request, limits);
 
+            if (result.errorCategory() == SandboxErrorCategory.TIMEOUT) {
+                throw new AnalysisExecutionException("Python 执行超时（" + properties.timeoutSeconds() + " 秒）");
+            }
             if (result.exitCode() != 0) {
                 return new AnalysisResult(
                         List.of(), "Python 执行失败（退出码 " + result.exitCode() + "）",
-                        tail(result.stdout()), tail(result.stderr()), result.exitCode());
+                        tail(result.stdoutTail()), tail(result.stderrTail()), result.exitCode());
             }
-            String out = tail(result.stdout());
-            if (Files.exists(output)) {
-                try {
-                    SandboxOutput parsed = objectMapper.readValue(
-                            Files.readString(output, StandardCharsets.UTF_8), SandboxOutput.class);
-                    return new AnalysisResult(parsed.charts(), parsed.summary(), out, tail(result.stderr()), 0);
-                } catch (IOException ex) {
-                    throw new AnalysisExecutionException("沙箱输出不是合法的图表 JSON", ex);
-                }
+            String structured = result.structuredOutput();
+            if (structured == null || structured.isBlank()) {
+                throw new AnalysisExecutionException("沙箱未产生结构化输出");
             }
-            throw new AnalysisExecutionException("沙箱未产生 output.json 结果");
-        } catch (IOException ex) {
-            throw new AnalysisExecutionException("沙箱临时文件读写失败", ex);
-        } finally {
-            deleteQuietly(workDir);
-        }
-    }
-
-    private List<String> buildCommand(Path workDir, Path input, Path codeFile, Path output) {
-        List<String> command = new ArrayList<>(List.of(
-                "docker", "run", "--rm",
-                "--network", "none",
-                "--user", "65534:65534",
-                "--read-only",
-                "--cap-drop", "ALL",
-                "--security-opt", "no-new-privileges",
-                "--memory", String.valueOf(properties.memoryBytes()),
-                "--memory-swap", String.valueOf(properties.memoryBytes()),
-                "--cpus", String.valueOf(properties.cpus()),
-                "--pids-limit", "64",
-                "-v", workDir.toAbsolutePath().toString() + ":/work:ro",
-                "-w", "/tmp",
-                properties.sandboxImage(),
-                properties.sandboxCommand(),
-                "/work/main.py"));
-        return command;
-    }
-
-    private ProcessResult runContainer(List<String> command, Path workDir) throws AnalysisExecutionException {
-        try {
-            Process process = new ProcessBuilder(command)
-                    .redirectErrorStream(false)
-                    .start();
-            byte[] stdout = process.getInputStream().readNBytes(MAX_STDOUT_BYTES + 1);
-            byte[] stderr = process.getErrorStream().readNBytes(MAX_STDOUT_BYTES + 1);
-            boolean finished = process.waitFor(properties.timeoutSeconds(), TimeUnit.SECONDS);
-            if (!finished) {
-                process.destroyForcibly();
-                throw new AnalysisExecutionException("Python 执行超时（" + properties.timeoutSeconds() + " 秒）");
+            try {
+                SandboxOutput parsed = objectMapper.readValue(structured, SandboxOutput.class);
+                return new AnalysisResult(parsed.charts(), parsed.summary(),
+                        tail(result.stdoutTail()), tail(result.stderrTail()), 0);
+            } catch (Exception ex) {
+                throw new AnalysisExecutionException("沙箱输出不是合法的图表 JSON", ex);
             }
-            return new ProcessResult(
-                    process.exitValue(),
-                    new String(stdout, StandardCharsets.UTF_8),
-                    new String(stderr, StandardCharsets.UTF_8));
-        } catch (IOException ex) {
-            throw new AnalysisExecutionException("无法启动隔离容器", ex);
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            throw new AnalysisExecutionException("隔离容器执行被中断", ex);
-        }
-    }
-
-    private String dockerInfo() {
-        try {
-            Process process = new ProcessBuilder("docker", "info").start();
-            process.getInputStream().readAllBytes();
-            boolean finished = process.waitFor(5, TimeUnit.SECONDS);
-            return finished && process.exitValue() == 0 ? "ok" : null;
-        } catch (IOException | InterruptedException ex) {
-            log.debug("sandbox_docker_unavailable message={}", ex.getMessage());
-            return null;
-        }
-    }
-
-    private Path createWorkDir() throws AnalysisExecutionException {
-        try {
-            return Files.createTempDirectory("analysis-sandbox-");
-        } catch (IOException ex) {
-            throw new AnalysisExecutionException("无法创建沙箱临时目录", ex);
-        }
-    }
-
-    private void writeJson(Path path, Object value) throws IOException {
-        Files.writeString(path, objectMapper.writeValueAsString(value), StandardCharsets.UTF_8);
-    }
-
-    private static String tail(String value) {
-        if (value == null || value.isBlank()) {
-            return "";
-        }
-        return value.length() > MAX_TAIL_CHARS ? value.substring(0, MAX_TAIL_CHARS) : value;
-    }
-
-    private static void deleteQuietly(Path dir) {
-        try {
-            if (dir != null && Files.exists(dir)) {
-                Files.walk(dir)
-                        .sorted((a, b) -> b.getNameCount() - a.getNameCount())
-                        .forEach(path -> {
-                            try {
-                                Files.deleteIfExists(path);
-                            } catch (IOException ignored) {
-                                // 临时目录清理失败不影响主流程
-                            }
-                        });
-            }
-        } catch (IOException ignored) {
-            // 清理失败忽略
+        } catch (SandboxException ex) {
+            throw new AnalysisExecutionException(ex.getMessage(), ex.getCause());
         }
     }
 
@@ -190,6 +113,10 @@ public class SandboxPythonEngine implements AnalysisEngine {
     public record SandboxOutput(List<ChartSchema.TypedChart> charts, String summary) {
     }
 
-    private record ProcessResult(int exitCode, String stdout, String stderr) {
+    private static String tail(String value) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        return value.length() > MAX_TAIL_CHARS ? value.substring(0, MAX_TAIL_CHARS) : value;
     }
 }

@@ -106,6 +106,13 @@
       <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
     </dependency>
 
+    <!-- P13-M4：可复用隔离执行能力。SandboxPythonEngine 作为薄适配器调用 SandboxExecutor，Docker 进程管理已下沉到该模块。 -->
+    <dependency>
+      <groupId>com.zzj</groupId>
+      <artifactId>zzj-sandbox</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
     <!-- P13-M3A：管理查询 RPC 契约与 Provider（nacos-client 统一用 SCA 管理的 3.0.3）。 -->
     <dependency>
       <groupId>com.zzj</groupId>

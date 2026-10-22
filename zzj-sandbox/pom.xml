@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.zzj</groupId>
+    <artifactId>zzj-parent</artifactId>
+    <version>0.1.0</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>zzj-sandbox</artifactId>
+  <name>zzj-sandbox</name>
+  <description>P13-M4：可复用的隔离执行能力（Docker Python 受控容器）。普通 jar，不含 Spring/Nacos/Dubbo/MySQL/认证，禁止反向依赖 zzj-service。</description>
+
+  <dependencies>
+    <!-- 仅日志 API：容器进程启动、受控 I/O、资源限制、超时与清理本身不依赖 Spring/持久化/网络栈。 -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+
+    <!-- 仅测试用途：验证执行契约、命令结构与失败关闭行为。 -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <!--
+    P13-M4：保持为普通 JAR（不打 Spring Boot repackage），也不含启动类/Controller/Repository。
+    finalName=zzj-sandbox，便于 zzj-service 以稳定坐标依赖。
+  -->
+  <build>
+    <finalName>zzj-sandbox</finalName>
+  </build>
+</project>

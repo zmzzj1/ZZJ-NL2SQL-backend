@@ -20,6 +20,7 @@
 
   <modules>
     <module>zzj-common</module>
+    <module>zzj-sandbox</module>
     <module>zzj-service</module>
     <module>zzj-gateway</module>
     <module>zzj-admin</module>
