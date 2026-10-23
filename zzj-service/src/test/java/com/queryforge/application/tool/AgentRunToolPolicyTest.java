@@ -38,7 +38,8 @@ class AgentRunToolPolicyTest {
         when(repository.findRun(RUN_ID)).thenReturn(Optional.of(new AgentRun(
                 RUN_ID, 1L, 7L, 10L, "A 商店库", "问题", com.queryforge.domain.agent.RunStatus.RUNNING,
                 null, null, null, 0, null, null, null, NOW, NOW,
-                agentId, 1L, null, toolPolicyHash)));
+                agentId, 1L, null, toolPolicyHash,
+                Boolean.TRUE, 0, null, false, null, 0, null)));
     }
 
     private AgentRunToolPolicy policy() {

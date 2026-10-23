@@ -36,7 +36,14 @@ public record CreateAgentRunRequest(
          * 存在时跳过 Manager 分类与 Planner，走单次受控工具执行链。
          */
         @Valid
-        ToolInvocationRequest toolInvocation
+        ToolInvocationRequest toolInvocation,
+
+        /**
+         * P14-D：计划级风险审核模式。true（默认）= 跳过计划级 LLM 风险评估与人工审核，
+         * 不跳过具体 SQL 的逐版本确认；false = 复杂计划生成后由 Gate 判断是否需人工审核。
+         * 仅针对本次 Agent Run 固定为创建时的快照，继续执行时不读取前端新值。
+         */
+        Boolean autoConfirm
 ) {
 
     /**

@@ -190,7 +190,8 @@ class ApprovedSqlHandoffP14CTest {
     private AgentRun run(RunStatus status) {
         return new AgentRun(RUN_ID, USER_ID, CONVERSATION_ID, CONNECTION_ID, "A 商店库", QUESTION,
                 status, "COMPLEX", null, null, 0, null, null, null, NOW, NOW,
-                null, null, null, null);
+                null, null, null, null,
+                Boolean.TRUE, 0, null, false, null, 0, null);
     }
 
     private AgentStep codeStep() {

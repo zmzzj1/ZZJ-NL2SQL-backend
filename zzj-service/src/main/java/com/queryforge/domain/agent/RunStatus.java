@@ -3,6 +3,7 @@ package com.queryforge.domain.agent;
 public enum RunStatus {
     PLANNING,
     WAITING_APPROVAL,
+    WAITING_PLAN_REVIEW,
     RUNNING,
     CLARIFYING,
     COMPLETED,

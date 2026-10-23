@@ -7,6 +7,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.queryforge.application.mcp.McpToolExecutionCoordinator;
 import com.queryforge.application.tool.ToolRegistry;
 import com.queryforge.domain.agent.roles.RoleDisabledException;
 import com.queryforge.domain.agent.roles.ToolNotAllowedException;
@@ -27,13 +28,15 @@ class ToolAssistantAgentP14ATest {
 
     private final ToolRegistry tools = mock(ToolRegistry.class);
     private final RoleRegistry registry = new RoleRegistry(new RoleProperties(Map.of(), Map.of()));
-    private final ToolAssistantAgent agent = new ToolAssistantAgent(registry, tools);
+    private final ToolAssistantAgent agent =
+            new ToolAssistantAgent(registry, tools, mock(McpToolExecutionCoordinator.class));
 
     private final ToolInvocation invocation = new ToolInvocation(1L, "describe_schema", 7L, 5L, 11L, null, null);
 
     @Test
     @DisplayName("任意真实工具名都能通过角色能力门禁并委派给 ToolRegistry")
     void invoke_shouldCheckCapabilityNotToolName() {
+        when(tools.contains("describe_schema")).thenReturn(true);
         when(tools.invoke(any(), any())).thenReturn(new ToolInvocationResult("describe_schema", Map.of(), 1));
 
         agent.invoke(invocation, Map.of("table", "orders"));
@@ -46,7 +49,9 @@ class ToolAssistantAgentP14ATest {
     void invoke_shouldRejectWhenRoleDisabled() {
         RoleRegistry disabled = new RoleRegistry(new RoleProperties(
                 Map.of(com.queryforge.domain.agent.roles.AgentRole.TOOL_ASSISTANT, false), Map.of()));
-        ToolAssistantAgent agent = new ToolAssistantAgent(disabled, tools);
+        ToolAssistantAgent agent = new ToolAssistantAgent(disabled, tools,
+                mock(McpToolExecutionCoordinator.class));
+        when(tools.contains("describe_schema")).thenReturn(true);
 
         assertThatThrownBy(() -> agent.invoke(invocation, Map.of()))
                 .isInstanceOf(RoleDisabledException.class);
@@ -56,6 +61,7 @@ class ToolAssistantAgentP14ATest {
     @Test
     @DisplayName("显式指定 MCP 能力时按 MCP 能力名门禁")
     void invoke_shouldSupportMcpCapability() {
+        when(tools.contains("describe_schema")).thenReturn(true);
         when(tools.invoke(any(), any())).thenReturn(new ToolInvocationResult("mcp_tool", Map.of(), 1));
 
         agent.invoke(invocation, Map.of(), ToolAssistantAgent.MCP_CAPABILITY);
@@ -66,6 +72,8 @@ class ToolAssistantAgentP14ATest {
     @Test
     @DisplayName("未知能力名被拒绝（不放宽到全部工具）")
     void invoke_shouldRejectUnknownCapability() {
+        when(tools.contains("describe_schema")).thenReturn(true);
+
         assertThatThrownBy(() -> agent.invoke(invocation, Map.of(), "everything"))
                 .isInstanceOf(ToolNotAllowedException.class);
         verify(tools, org.mockito.Mockito.never()).invoke(any(), any());

@@ -58,6 +58,7 @@ import com.queryforge.domain.agent.ResolvedAgentConfig;
 import com.queryforge.application.agent.RuntimeConfigResolver;
 import com.queryforge.infrastructure.redis.AgentPlanStore;
 import com.queryforge.infrastructure.redis.ApprovalSessionStore;
+import com.queryforge.infrastructure.redis.PlanReviewSessionStore;
 import com.queryforge.domain.agent.AgentPlan;
 
 @ExtendWith(MockitoExtension.class)
@@ -123,6 +124,12 @@ class AgentRunServiceTest {
     private ApprovalSessionStore approvalSessionStore;
 
     @Mock
+    private PlanReviewSessionStore planReviewSessionStore;
+
+    @Mock
+    private PlanReviewGate planReviewGate;
+
+    @Mock
     private com.queryforge.application.agent.roles.ToolAssistantAgent toolAssistant;
 
     @Mock
@@ -175,7 +182,8 @@ class AgentRunServiceTest {
                 repository, conversationService, connectionService, sqlAssistant, objectMapper,
                 knowledgeService, configResolver, graphStateService, approvalSessionStore,
                 engine, contextAssembler, failureHandler, planState, roleRecorder, llmLimiter,
-                new com.queryforge.application.agent.ToolInvocationRequestGuard());
+                new com.queryforge.application.agent.ToolInvocationRequestGuard(),
+                planReviewGate, planReviewSessionStore, planner);
         org.mockito.Mockito.lenient().when(roleAssigner.assign(anyString())).thenReturn(AgentRole.DATA_ANALYST);
         org.mockito.Mockito.lenient()
                 .when(repository.tryIncrementLlmCalls(anyLong(), anyInt())).thenReturn(1);
@@ -190,11 +198,11 @@ class AgentRunServiceTest {
                 .thenReturn(new ConnectionService.ConnectionSummary(CONNECTION_ID, "A 商店库", "sql_demo_a"));
         when(repository.insertRun(
                 USER_ID, CONVERSATION_ID, CONNECTION_ID, "A 商店库", QUESTION, RunStatus.PLANNING,
-                null, null, "{}", "[]"))
+                null, null, "{}", "[]", null))
                 .thenReturn(RUN_ID);
 
         PreparedRun prepared = service.prepareStart(
-                USER_ID, new CreateAgentRunRequest(CONVERSATION_ID, CONNECTION_ID, QUESTION, null, null, null, null, null));
+                USER_ID, new CreateAgentRunRequest(CONVERSATION_ID, CONNECTION_ID, QUESTION, null, null, null, null, null, null));
 
         assertThat(prepared.runId()).isEqualTo(RUN_ID);
         assertThat(prepared.database()).isEqualTo("sql_demo_a");
@@ -488,7 +496,8 @@ class AgentRunServiceTest {
         return new AgentRun(
                 RUN_ID, USER_ID, CONVERSATION_ID, CONNECTION_ID, "A 商店库", QUESTION,
                 status, null, null, null, 0, null, null, null, NOW, NOW,
-                null, null, null, null);
+                null, null, null, null,
+                Boolean.TRUE, 0, null, false, null, 0, null);
     }
 
     private static AgentStep step(StepStatus status, String sql, int version, int repairCount) {

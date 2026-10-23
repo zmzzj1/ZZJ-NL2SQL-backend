@@ -20,7 +20,8 @@ public final class GraphTransition {
                 GraphNode.PLANNING, GraphNode.KNOWLEDGE, GraphNode.WAITING_CLARIFICATION,
                 GraphNode.TOOL_INVOCATION, GraphNode.COMPLETED, GraphNode.FAILED));
         EDGES.put(GraphNode.PLANNING, EnumSet.of(
-                GraphNode.CONTEXT_BUILDING, GraphNode.WAITING_CLARIFICATION, GraphNode.COMPLETED, GraphNode.FAILED));
+                GraphNode.HITL_GATE, GraphNode.CONTEXT_BUILDING,
+                GraphNode.WAITING_CLARIFICATION, GraphNode.COMPLETED, GraphNode.FAILED));
         EDGES.put(GraphNode.CONTEXT_BUILDING, EnumSet.of(GraphNode.RUNNING, GraphNode.FAILED));
         EDGES.put(GraphNode.RUNNING, EnumSet.of(
                 GraphNode.SQL_GENERATION, GraphNode.TOOL_INVOCATION, GraphNode.CODE_ANALYSIS,
@@ -43,6 +44,11 @@ public final class GraphTransition {
         EDGES.put(GraphNode.REPORT_GENERATION, EnumSet.of(GraphNode.COMPLETED, GraphNode.FAILED));
         EDGES.put(GraphNode.WAITING_CLARIFICATION, EnumSet.of(
                 GraphNode.PLANNING, GraphNode.CANCELED, GraphNode.FAILED));
+        // P14-D：计划级 HITL Gate 分支。
+        EDGES.put(GraphNode.HITL_GATE, EnumSet.of(
+                GraphNode.CONTEXT_BUILDING, GraphNode.WAITING_PLAN_REVIEW));
+        EDGES.put(GraphNode.WAITING_PLAN_REVIEW, EnumSet.of(
+                GraphNode.CONTEXT_BUILDING, GraphNode.PLANNING, GraphNode.FAILED, GraphNode.CANCELED));
     }
 
     private GraphTransition() {

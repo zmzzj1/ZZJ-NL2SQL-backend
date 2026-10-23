@@ -3,6 +3,7 @@ package com.queryforge.infrastructure.persistence;
 import com.queryforge.domain.agent.AgentRun;
 import com.queryforge.domain.agent.AgentStep;
 import com.queryforge.domain.agent.ApprovalStatus;
+import com.queryforge.domain.agent.PlanReviewStatus;
 import com.queryforge.domain.agent.RunStatus;
 import com.queryforge.domain.agent.StepStatus;
 import java.sql.PreparedStatement;
@@ -27,7 +28,9 @@ public class AgentRunRepository {
             id, user_id, conversation_id, connection_id, connection_name_snapshot, question,
             status, route, role_activities, knowledge_sources, llm_call_count,
             summary, error_code, error_message, created_at, updated_at,
-            agent_id, agent_version_id, resolved_skill_versions, tool_policy_hash
+            agent_id, agent_version_id, resolved_skill_versions, tool_policy_hash,
+            plan_auto_confirm, plan_review_version, plan_review_status, plan_review_required,
+            plan_review_reason, plan_rejection_count, plan_review_feedback
             """;
 
     private static final String STEP_COLUMNS = """
@@ -51,13 +54,25 @@ public class AgentRunRepository {
     public Long insertRun(Long userId, Long conversationId, Long connectionId, String connectionName,
                           String question, RunStatus status, Long agentId, Long agentVersionId,
                           String resolvedSkillVersions, String toolPolicyHash) {
+        return insertRun(userId, conversationId, connectionId, connectionName, question, status,
+                agentId, agentVersionId, resolvedSkillVersions, toolPolicyHash, Boolean.TRUE);
+    }
+
+    /**
+     * P14-D：创建 Run 时固定计划级审核模式。{@code planAutoConfirm} 为 null 时按默认 true 处理
+     * （兼容未传该字段的旧调用，避免旧 Run 意外卡在计划审核）。
+     */
+    public Long insertRun(Long userId, Long conversationId, Long connectionId, String connectionName,
+                          String question, RunStatus status, Long agentId, Long agentVersionId,
+                          String resolvedSkillVersions, String toolPolicyHash, Boolean planAutoConfirm) {
         KeyHolder keyHolder = new GeneratedKeyHolder();
+        boolean auto = planAutoConfirm != null && planAutoConfirm;
         jdbcTemplate.update(connection -> {
             PreparedStatement statement = connection.prepareStatement("""
                     INSERT INTO agent_runs
                         (user_id, conversation_id, connection_id, connection_name_snapshot, question, status,
-                         agent_id, agent_version_id, resolved_skill_versions, tool_policy_hash)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         agent_id, agent_version_id, resolved_skill_versions, tool_policy_hash, plan_auto_confirm)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, Statement.RETURN_GENERATED_KEYS);
             statement.setLong(1, userId);
             statement.setLong(2, conversationId);
@@ -69,6 +84,7 @@ public class AgentRunRepository {
             setNullableLong(statement, 8, agentVersionId);
             statement.setString(9, resolvedSkillVersions);
             statement.setString(10, toolPolicyHash);
+            statement.setBoolean(11, auto);
             return statement;
         }, keyHolder);
         Number key = keyHolder.getKey();
@@ -447,6 +463,125 @@ public class AgentRunRepository {
                 RunStatus.RUNNING.name());
     }
 
+    // ---------------------------------------------------------------- P14-D：计划级 HITL 审核持久化
+
+    /** 仅迁移 Run 持久状态（不触碰其他字段，避免覆盖 summary/error）。 */
+    public int transitionRunStatus(Long runId, RunStatus status) {
+        return jdbcTemplate.update(
+                "UPDATE agent_runs SET status = ?, updated_at = ? WHERE id = ?",
+                status.name(), LocalDateTime.now(), runId);
+    }
+
+    /**
+     * 进入计划审核等待：Run=WAITING_PLAN_REVIEW，审核状态=AWAITING，版本+1。
+     * 仅在 PLANNING 阶段成功（rowsAffected==1），并发/非预期状态不会误入。
+     * 成功返回新的审核版本（≥1），失败返回 -1。
+     */
+    public int enterPlanReviewAwaiting(Long runId, Long userId, String reason) {
+        int updated = jdbcTemplate.update("""
+                        UPDATE agent_runs
+                        SET status = ?, plan_review_status = ?, plan_review_required = 1,
+                            plan_review_reason = ?, plan_review_version = plan_review_version + 1,
+                            updated_at = ?
+                        WHERE id = ? AND user_id = ? AND status = 'PLANNING'
+                        """,
+                RunStatus.WAITING_PLAN_REVIEW.name(), PlanReviewStatus.AWAITING.name(),
+                truncateReason(reason), LocalDateTime.now(), runId, userId);
+        if (updated != 1) {
+            return -1;
+        }
+        return currentPlanReviewVersion(runId);
+    }
+
+    /** 记录 Gate 判定（SKIPPED/NOT_REQUIRED/EVAL_UNAVAILABLE），不进入等待，不阻塞执行。 */
+    public int markPlanReviewStatus(Long runId, Long userId, PlanReviewStatus status) {
+        return jdbcTemplate.update("""
+                        UPDATE agent_runs
+                        SET plan_review_status = ?, plan_review_required = 0, updated_at = ?
+                        WHERE id = ? AND user_id = ?
+                        """,
+                status.name(), LocalDateTime.now(), runId, userId);
+    }
+
+    /**
+     * 一次性批准：把当前 AWAITING 版本标记为 APPROVED 并自增版本（作废旧会话）。
+     * 仅当 Run=WAITING_PLAN_REVIEW、状态=AWAITING 且版本匹配时成功（rowsAffected==1）。
+     */
+    public int claimPlanApproval(Long runId, Long userId, int version) {
+        return jdbcTemplate.update("""
+                        UPDATE agent_runs
+                        SET plan_review_status = ?, plan_review_required = 0,
+                            plan_review_version = plan_review_version + 1, updated_at = ?
+                        WHERE id = ? AND user_id = ? AND status = 'WAITING_PLAN_REVIEW'
+                          AND plan_review_status = 'AWAITING' AND plan_review_version = ?
+                        """,
+                PlanReviewStatus.APPROVED.name(), LocalDateTime.now(), runId, userId, version);
+    }
+
+    /**
+     * 一次性拒绝：拒绝计数+1，置为 REPLAN_REQUIRED 等待重规划（版本在重规划重新进入 AWAITING 时自增）。
+     * 同样要求 Run=WAITING_PLAN_REVIEW、AWAITING、版本匹配（rowsAffected==1）。
+     */
+    public int claimPlanRejection(Long runId, Long userId, int version, String feedback, String reason) {
+        return jdbcTemplate.update("""
+                        UPDATE agent_runs
+                        SET plan_rejection_count = plan_rejection_count + 1,
+                            plan_review_status = ?, plan_review_required = 1,
+                            plan_review_feedback = ?, plan_review_reason = ?, updated_at = ?
+                        WHERE id = ? AND user_id = ? AND status = 'WAITING_PLAN_REVIEW'
+                          AND plan_review_status = 'AWAITING' AND plan_review_version = ?
+                        """,
+                PlanReviewStatus.REPLAN_REQUIRED.name(), truncateFeedback(feedback),
+                truncateReason(reason), LocalDateTime.now(), runId, userId, version);
+    }
+
+    /** 第 3 次拒绝后终结 Run：FAILED + REJECTED，清理等待标记。 */
+    public int failPlanReview(Long runId, String errorCode, String errorMessage) {
+        return jdbcTemplate.update("""
+                        UPDATE agent_runs
+                        SET status = ?, plan_review_status = ?, plan_review_required = 0,
+                            error_code = ?, error_message = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                RunStatus.FAILED.name(), PlanReviewStatus.REJECTED.name(), errorCode, errorMessage,
+                LocalDateTime.now(), runId);
+    }
+
+    /** 重规划前原子作废全部尚未执行的 PENDING 步骤（不触碰已执行/已确认步骤）。 */
+    public int deletePendingSteps(Long runId) {
+        return jdbcTemplate.update(
+                "DELETE FROM agent_steps WHERE run_id = ? AND status = ?",
+                runId, StepStatus.PENDING.name());
+    }
+
+    public int currentPlanReviewVersion(Long runId) {
+        List<Integer> rows = jdbcTemplate.query(
+                "SELECT plan_review_version FROM agent_runs WHERE id = ?",
+                (resultSet, rowNum) -> resultSet.getInt(1), runId);
+        return rows.isEmpty() ? 0 : rows.get(0);
+    }
+
+    public int currentRejectionCount(Long runId) {
+        List<Integer> rows = jdbcTemplate.query(
+                "SELECT plan_rejection_count FROM agent_runs WHERE id = ?",
+                (resultSet, rowNum) -> resultSet.getInt(1), runId);
+        return rows.isEmpty() ? 0 : rows.get(0);
+    }
+
+    private static String truncateReason(String reason) {
+        if (reason == null) {
+            return null;
+        }
+        return reason.length() > 300 ? reason.substring(0, 300) : reason;
+    }
+
+    private static String truncateFeedback(String feedback) {
+        if (feedback == null) {
+            return null;
+        }
+        return feedback.length() > 4000 ? feedback.substring(0, 4000) : feedback;
+    }
+
     private static void setNullableLong(PreparedStatement statement, int index, Long value)
             throws java.sql.SQLException {
         if (value == null) {
@@ -463,6 +598,13 @@ public class AgentRunRepository {
         Long nullableAgentId = resultSet.wasNull() ? null : agentId;
         long agentVersionId = resultSet.getLong("agent_version_id");
         Long nullableAgentVersionId = resultSet.wasNull() ? null : agentVersionId;
+        boolean planAutoConfirm = resultSet.getBoolean("plan_auto_confirm");
+        int planReviewVersion = resultSet.getInt("plan_review_version");
+        String planReviewStatus = resultSet.getString("plan_review_status");
+        boolean planReviewRequired = resultSet.getBoolean("plan_review_required");
+        String planReviewReason = resultSet.getString("plan_review_reason");
+        int planRejectionCount = resultSet.getInt("plan_rejection_count");
+        String planReviewFeedback = resultSet.getString("plan_review_feedback");
         return new AgentRun(
                 resultSet.getLong("id"),
                 resultSet.getLong("user_id"),
@@ -483,7 +625,14 @@ public class AgentRunRepository {
                 nullableAgentId,
                 nullableAgentVersionId,
                 resultSet.getString("resolved_skill_versions"),
-                resultSet.getString("tool_policy_hash"));
+                resultSet.getString("tool_policy_hash"),
+                planAutoConfirm,
+                planReviewVersion,
+                planReviewStatus,
+                planReviewRequired,
+                planReviewReason,
+                planRejectionCount,
+                planReviewFeedback);
     }
 
     private static AgentStep mapStep(java.sql.ResultSet resultSet) throws java.sql.SQLException {

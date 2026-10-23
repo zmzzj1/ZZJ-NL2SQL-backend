@@ -4,9 +4,11 @@ import com.queryforge.domain.agent.AgentRunResponse;
 import com.queryforge.domain.agent.AgentRunSummaryResponse;
 import com.queryforge.domain.agent.ApproveAgentStepRequest;
 import com.queryforge.domain.agent.CreateAgentRunRequest;
+import com.queryforge.domain.agent.PlanDecisionRequest;
 import com.queryforge.domain.identity.AppUserPrincipal;
 import com.queryforge.application.agent.AgentRunService;
 import com.queryforge.application.agent.PreparedApproval;
+import com.queryforge.application.agent.PreparedPlanDecision;
 import com.queryforge.application.agent.PreparedRun;
 import jakarta.validation.Valid;
 import java.util.List;
@@ -74,6 +76,19 @@ public class AgentRunController {
             @AuthenticationPrincipal AppUserPrincipal principal,
             @PathVariable Long runId) {
         service.cancel(principal.id(), runId);
+    }
+
+    /**
+     * P14-D：计划级审核决定（批准/拒绝并重规划）。仅校验字段与登录态，全部事实来源交给 Service 的
+     * 一次性领取与 CAS 裁决；userId/workspaceId/connectionId 一律源自 Run 持久化事实。
+     */
+    @PostMapping("/{runId}/plan/continue/stream")
+    public ResponseEntity<StreamingResponseBody> continuePlanReview(
+            @AuthenticationPrincipal AppUserPrincipal principal,
+            @PathVariable Long runId,
+            @Valid @RequestBody PlanDecisionRequest request) {
+        PreparedPlanDecision prepared = service.preparePlanDecision(principal.id(), runId, request);
+        return sse(outputStream -> service.continuePlanReview(prepared, outputStream));
     }
 
     @GetMapping("/{runId}")

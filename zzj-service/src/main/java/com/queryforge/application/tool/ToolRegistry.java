@@ -44,6 +44,11 @@ public class ToolRegistry {
                 .toList();
     }
 
+    /** 工具是否存在于内置白名单（用于区分内置工具与 MCP 工具，决定路由）。 */
+    public boolean contains(String toolName) {
+        return toolName != null && tools.containsKey(toolName);
+    }
+
     /** 执行工具：白名单校验 → Agent 白名单过滤 → 参数校验 → 执行 → 审计。 */
     public ToolInvocationResult invoke(ToolInvocation invocation, Map<String, Object> args) {
         Tool tool = tools.get(invocation.toolName());

@@ -8,6 +8,8 @@ public enum GraphNode {
     CREATED,
     ROUTING,
     PLANNING,
+    HITL_GATE,
+    WAITING_PLAN_REVIEW,
     CONTEXT_BUILDING,
     RUNNING,
     KNOWLEDGE,

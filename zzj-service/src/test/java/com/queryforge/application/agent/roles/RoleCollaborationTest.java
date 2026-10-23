@@ -13,6 +13,7 @@ import com.queryforge.domain.analysis.CreateAnalysisRunRequest;
 import com.queryforge.application.report.ReportService;
 import com.queryforge.domain.report.CreateReportRequest;
 import com.queryforge.domain.tool.ToolInvocation;
+import com.queryforge.application.mcp.McpToolExecutionCoordinator;
 import com.queryforge.application.tool.ToolRegistry;
 import java.util.EnumMap;
 import java.util.Map;
@@ -84,7 +85,9 @@ class RoleCollaborationTest {
         RoleRegistry enabled = new RoleRegistry(new RoleProperties(Map.of(), Map.of()));
         ToolRegistry tools = mock(ToolRegistry.class);
         when(tools.invoke(any(), any())).thenReturn(null);
-        ToolAssistantAgent agent = new ToolAssistantAgent(enabled, tools);
+        ToolAssistantAgent agent = new ToolAssistantAgent(enabled, tools,
+                mock(McpToolExecutionCoordinator.class));
+        when(tools.contains("mcp")).thenReturn(true);
 
         ToolInvocation invocation = new ToolInvocation(5L, "mcp", 1L, 9L, 2L, null, null);
         agent.invoke(invocation, Map.of());

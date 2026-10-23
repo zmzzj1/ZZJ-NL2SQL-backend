@@ -50,6 +50,7 @@ import com.queryforge.domain.report.ReportResponse;
 import com.queryforge.infrastructure.persistence.AgentRunRepository;
 import com.queryforge.infrastructure.redis.AgentPlanStore;
 import com.queryforge.infrastructure.redis.ApprovalSessionStore;
+import com.queryforge.infrastructure.redis.PlanReviewSessionStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
@@ -129,6 +130,10 @@ class AgentRoleDispatchP14CTest {
     @Mock
     private ApprovalSessionStore approvalSessionStore;
     @Mock
+    private PlanReviewSessionStore planReviewSessionStore;
+    @Mock
+    private PlanReviewGate planReviewGate;
+    @Mock
     private ToolAssistantAgent toolAssistant;
     @Mock
     private AgentRunToolPolicy toolPolicy;
@@ -177,7 +182,8 @@ class AgentRoleDispatchP14CTest {
                 repository, conversationService, connectionService, sqlAssistant, objectMapper,
                 knowledgeService, configResolver, graphStateService, approvalSessionStore,
                 engine, contextAssembler, failureHandler, planState, roleRecorder, llmLimiter,
-                new ToolInvocationRequestGuard());
+                new ToolInvocationRequestGuard(),
+                planReviewGate, planReviewSessionStore, planner);
 
         lenient().when(repository.tryIncrementLlmCalls(anyLong(), anyInt())).thenReturn(1);
         lenient().when(connectionService.schemaContext(USER_ID, CONNECTION_ID)).thenReturn(SCHEMA);
@@ -198,7 +204,8 @@ class AgentRoleDispatchP14CTest {
         return new AgentRun(
                 RUN_ID, USER_ID, CONVERSATION_ID, CONNECTION_ID, "A 商店库", QUESTION,
                 status, route, null, null, 0, null, null, null, NOW, NOW,
-                null, null, null, null);
+                null, null, null, null,
+                Boolean.TRUE, 0, null, false, null, 0, null);
     }
 
     private AgentStep step(long id, int sequence, String objective, Integer dependsOn, StepStatus status,

@@ -115,8 +115,10 @@ public class StudioController {
             @AuthenticationPrincipal AppUserPrincipal principal,
             @PathVariable Long agentId,
             @Valid @RequestBody TestRequest request) {
+        // P14-D：Studio 测试运行沿用原有行为——跳过计划级审核，但 SQL 逐版本确认仍然生效。
         CreateAgentRunRequest runRequest = new CreateAgentRunRequest(
-                request.conversationId(), request.connectionId(), request.userInput(), agentId, null, true, null, null);
+                request.conversationId(), request.connectionId(), request.userInput(), agentId, null, true, null, null,
+                Boolean.TRUE);
         PreparedRun prepared = agentRunService.prepareStart(principal.id(), runRequest);
         return ResponseEntity.ok()
                 .contentType(EVENT_STREAM)

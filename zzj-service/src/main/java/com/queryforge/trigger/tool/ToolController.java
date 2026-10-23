@@ -11,26 +11,38 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import com.queryforge.application.tool.ToolDiscoveryService;
 import com.queryforge.application.tool.ToolRegistry;
+import com.queryforge.domain.identity.AppUserPrincipal;
 import com.queryforge.domain.tool.ToolInvocation;
 import com.queryforge.domain.tool.ToolInvocationResult;
 
 /**
  * X1 工具端点：目录（GET）与只读工具调用（POST）。工具名白名单 + 服务端参数校验 + 审计。
+ * P14-E 新增 {@code /discovery} 提供 builtin/mcp/skill 统一目录，旧 {@code /} 保持稳定以兼容 ToolPicker。
  */
 @RestController
 @RequestMapping("/api/v1/tools")
 public class ToolController {
 
     private final ToolRegistry registry;
+    private final ToolDiscoveryService discoveryService;
 
-    public ToolController(ToolRegistry registry) {
+    public ToolController(ToolRegistry registry, ToolDiscoveryService discoveryService) {
         this.registry = registry;
+        this.discoveryService = discoveryService;
     }
 
     @GetMapping
     public List<ToolRegistry.ToolDescriptor> catalog() {
         return registry.catalog();
+    }
+
+    /** P14-E：用户作用域统一工具目录（内置 / MCP / Skill），含 kind/source/invocationMode/serverId 等规范字段。 */
+    @GetMapping("/discovery")
+    public List<ToolDiscoveryService.DiscoveredTool> discovery(
+            @AuthenticationPrincipal AppUserPrincipal principal) {
+        return discoveryService.discover(principal.id());
     }
 
     @PostMapping("/invoke")

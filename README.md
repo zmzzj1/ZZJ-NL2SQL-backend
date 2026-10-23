@@ -1,6 +1,6 @@
 # QueryForge 后端（真实用户与多数据源）
 
-Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性；P10 新增工作流定时调度与安全 CSV 导出；P11 新增统一 Agent 执行内核；P13 将公开入口拆为 Gateway，新增通过 Dubbo 查询核心业务数据的独立 Admin 服务，并把 Docker Python 隔离执行下沉为可复用 Sandbox 模块；P14-A 完成自适应 Manager 路由、分层上下文真实入模和用户显式工具调用闭环；P14-B/P14-C 新增 SQL 多候选筛选，以及 SQL 审批后衔接隔离 Python 分析与报告生成的依赖链。
+Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性；P10 新增工作流定时调度与安全 CSV 导出；P11 新增统一 Agent 执行内核；P13 将公开入口拆为 Gateway，新增通过 Dubbo 查询核心业务数据的独立 Admin 服务，并把 Docker Python 隔离执行下沉为可复用 Sandbox 模块；P14-A 完成自适应 Manager 路由、分层上下文真实入模和用户显式工具调用闭环；P14-B/P14-C 新增 SQL 多候选筛选，以及 SQL 审批后衔接隔离 Python 分析与报告生成的依赖链；P14-D/P14-E 新增高风险计划人工审核、拒绝后重规划，以及用户级 MCP 服务生命周期和工具发现。
 
 ## 环境要求
 
@@ -17,8 +17,9 @@ Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL �
 - Manager 使用当前问题、授权 Schema/知识摘要和压缩会话历史进行结构化路由；模型分类不可用时安全降级到 Planner，并保留多角色轨迹和 LLM 调用次数限制。
 - 中复杂度 SQL 生成最多三个候选，经只读 Guard 过滤并结合规则分与模型分确定唯一待审批 SQL；简单查询保持单候选路径，调用预算采用原子计数。
 - Agent 步骤支持显式角色与依赖：只有用户批准并真实执行的 SQL 结果才能进入隔离 Python 分析，分析产物再交给报告步骤；分析/报告 ID 和新增 SSE 事件均持久化，失败时不会绕过审批或回退宿主机。
+- 复杂计划可选择进入计划级风险审核：审核状态和版本持久化，批准后才开始执行，拒绝意见用于重新规划；一次性领取、版本校验和拒绝次数上限避免重复提交，且不替代逐条 SQL 审批。
 - 业务知识 CRUD、按连接鉴权检索和会话记忆摘要。
-- 受控工具注册表（只读工具 + 审计）、真实 MCP stdio 客户端（预配置白名单服务）；用户可显式选择一次工具调用，服务端执行参数边界校验、角色能力与 Agent 白名单双层授权、幂等领取和递归脱敏摘要。
+- 受控工具注册表（只读工具 + 审计）与用户级 MCP 服务管理：支持连接、断开、状态和工具发现；STDIO 只能选择服务端预配置白名单服务，远程 SSE 地址必须通过出站 URL 防护。用户可显式选择一次工具调用，服务端执行参数边界校验、角色能力与 Agent 白名单双层授权、幂等领取和递归脱敏摘要。
 - 隔离 Python 数据分析：`zzj-sandbox` 以普通 JAR 提供一次性 Docker 容器、非 root、禁网、只读根、资源/时间/输出限制和强制清理；运行时不可用时拒绝回退宿主机。另含内置确定性分析器。
 - 结构化图表（table/bar/line/pie）与净化 HTML 报告（CSP + 沙箱预览）。
 - 可视化工作流 DAG（校验、版本化、串行执行、SQL 审批暂停/恢复、SSE）。
@@ -59,6 +60,8 @@ mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/12-p11-agent-graph.sql
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/14-p13-admin-user-status.sql
 mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/15-p14c-agent-step-artifacts.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/15-p14-e-mcp-server-lifecycle.sql
+mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/16-p14d-plan-hitl.sql
 ```
 
 创建账号（密码由本地管理员设置，不提交仓库）：
@@ -190,12 +193,14 @@ mvn -pl zzj-admin spring-boot:run -Dspring-boot.run.arguments=--server.port=8083
 | POST | `/api/v1/agent/runs/{runId}/steps/{stepId}/approve/stream` | 确认步骤并继续运行 |
 | POST | `/api/v1/agent/runs/{runId}/steps/{stepId}/reject` | 拒绝步骤 |
 | POST | `/api/v1/agent/runs/{runId}/cancel` | 取消运行 |
+| POST | `/api/v1/agent/runs/{runId}/plan/continue/stream` | 批准计划继续执行，或携带意见拒绝并重新规划 |
 | GET | `/api/v1/agent/runs`、`/{runId}`、`/latest` | 查询与恢复运行 |
 | POST/GET/PUT/DELETE | `/api/v1/knowledge/**` | 业务知识维护与关键词检索 |
 | GET/POST | `/api/v1/tools`、`/api/v1/tools/invoke` | 只读工具目录与调用 |
 | POST/GET | `/api/v1/analysis/runs/**` | Python 隔离分析（SSE）与详情 |
 | POST/GET/DELETE | `/api/v1/reports`、`/api/v1/reports/{id}`、`/{id}/preview` | 报告生成、读取与净化预览 |
 | GET/POST | `/api/v1/mcp/servers`、`.../{name}/test`、`.../{tool}/call` | MCP 预配置服务发现与只读调用 |
+| GET/POST/PUT/DELETE | `/api/v1/mcp-servers/**` | 用户级 MCP 服务配置、连接/断开、状态与工具发现 |
 | POST/GET/PUT/DELETE | `/api/v1/workflows`、`/api/v1/workflows/{id}` | 工作流 DAG 定义与版本化 |
 | POST/GET | `/api/v1/workflows/{id}/runs/stream`、`.../approve/stream` | 工作流运行与审批续跑 |
 | GET/POST/PATCH/DELETE | `/api/v1/schedules/**` | 定时计划、Cron 预览、启停、手动触发与运行历史 |
@@ -223,7 +228,7 @@ mvn -pl zzj-admin spring-boot:run -Dspring-boot.run.arguments=--server.port=8083
 - Python 分析代码仅在隔离 Docker 容器执行（非 root、禁网、只读、去 capabilities、限额）；沙箱不可用时拒绝执行，不回退宿主机。
 - 分析输入仅来自服务端重新校验权限 + SQL Guard 后重新执行的真实受限结果，不接受前端伪造数组。
 - HTML 报告经白名单净化 + CSP + 沙箱 iframe 预览，禁止脚本执行。
-- MCP 仅连预配置白名单服务，不提供任意 URL/命令注册；工具输出视为不可信数据。
+- MCP 的 STDIO 命令只来自服务端预配置白名单，拒绝用户提交 shell 命令；远程 SSE 地址经出站 URL 防护阻断回环、内网、元数据与未受信目标；敏感环境变量禁止持久化，工具输出始终视为不可信数据。
 - Agent 工具白名单在服务端真实过滤（运行关联 Agent 时非白名单工具拒绝），自定义提示词仅追加在平台安全指令之后。
 - Skill 是低信任提示词模板：只允许白名单变量、不执行脚本、不扩权、不绕过 SQL 审批。
 - 工作空间授权与资源自身权限分离；共享资源不会绕过连接归属、SQL Guard 或执行审批。
@@ -259,6 +264,7 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn s
 
 ## 测试
 
+- P14-D/P14-E 全量验证：`mvn verify` 共 612 个自动化用例（`zzj-common` 6 个、`zzj-sandbox` 8 个、`zzj-service` 546 个、`zzj-gateway` 38 个、`zzj-admin` 14 个；0 failures/0 errors/22 skipped，2026-10-23 实跑）。新增覆盖计划风险 Gate、审核版本与一次性领取、批准/拒绝重规划、MCP 配置归属、连接生命周期、工具发现、参数校验/修复和传输失败边界。
 - P14-B/P14-C 全量验证：`mvn verify` 共 561 个自动化用例（`zzj-common` 6 个、`zzj-sandbox` 8 个、`zzj-service` 495 个、`zzj-gateway` 38 个、`zzj-admin` 14 个；0 failures/0 errors/22 skipped，2026-10-23 实跑）。新增覆盖多候选 Guard/评分/回退、原子调用预算、角色依赖与分派、批准 SQL 结果交接、分析与报告产物持久化、SSE 事件及真实沙箱条件检查。
 - P14-A 全量验证：`mvn verify` 共 481 个自动化用例（`zzj-common` 6 个、`zzj-sandbox` 8 个、`zzj-service` 415 个、`zzj-gateway` 38 个、`zzj-admin` 14 个；0 failures/0 errors/17 skipped，2026-10-23 实跑）。新增覆盖 Manager 安全降级、闲聊/澄清状态、显式工具调用、双层授权、参数边界、递归输出脱敏和分层上下文真实注入。
 - P13-M4 全量验证：`mvn verify` 共 432 个自动化用例（`zzj-common` 6 个、`zzj-sandbox` 8 个、`zzj-service` 366 个、`zzj-gateway` 38 个、`zzj-admin` 14 个；0 failures/0 errors/17 skipped，2026-10-22 实跑）。其中 5 个真实 Docker 安全/资源探针因当前 Docker 守护进程不可访问而如实跳过，其余跳过项为缺少对应外部测试条件的集成测试。

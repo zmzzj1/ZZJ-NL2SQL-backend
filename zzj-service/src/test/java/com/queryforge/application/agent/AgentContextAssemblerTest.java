@@ -62,7 +62,8 @@ class AgentContextAssemblerTest {
     }
 
     private PreparedRun run(ResolvedAgentConfig config) {
-        return new PreparedRun(5L, USER_ID, 7L, CONNECTION_ID, "sql_demo_a", QUESTION, config, null, null);
+        return new PreparedRun(5L, USER_ID, 7L, CONNECTION_ID, "sql_demo_a", QUESTION, config, null, null,
+                Boolean.TRUE);
     }
 
     @Test

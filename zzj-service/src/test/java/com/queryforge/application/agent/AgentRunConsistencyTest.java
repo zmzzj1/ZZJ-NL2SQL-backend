@@ -48,6 +48,7 @@ import com.queryforge.domain.query.SqlExecutionException;
 import com.queryforge.infrastructure.persistence.AgentRunRepository;
 import com.queryforge.infrastructure.redis.AgentPlanStore;
 import com.queryforge.infrastructure.redis.ApprovalSessionStore;
+import com.queryforge.infrastructure.redis.PlanReviewSessionStore;
 import com.queryforge.shared.error.ApiException;
 import com.queryforge.shared.error.ErrorCode;
 import java.io.ByteArrayOutputStream;
@@ -123,6 +124,10 @@ class AgentRunConsistencyTest {
     @Mock
     private ApprovalSessionStore approvalSessionStore;
     @Mock
+    private PlanReviewSessionStore planReviewSessionStore;
+    @Mock
+    private PlanReviewGate planReviewGate;
+    @Mock
     private RoleAssigner roleAssigner;
     @Mock
     private com.queryforge.application.agent.sql.SqlCandidateSelectionService selectionService;
@@ -176,7 +181,8 @@ class AgentRunConsistencyTest {
                 repository, conversationService, connectionService, sqlAssistant, objectMapper,
                 knowledgeService, configResolver, graphStateService, approvalSessionStore,
                 engine, contextAssembler, failureHandler, planState, roleRecorder, llmLimiter,
-                new com.queryforge.application.agent.ToolInvocationRequestGuard());
+                new com.queryforge.application.agent.ToolInvocationRequestGuard(),
+                planReviewGate, planReviewSessionStore, planner);
         lenient().when(roleAssigner.assign(anyString())).thenReturn(AgentRole.DATA_ANALYST);
     }
 
@@ -613,7 +619,8 @@ class AgentRunConsistencyTest {
         return new AgentRun(
                 RUN_ID, USER_ID, CONVERSATION_ID, CONNECTION_ID, "A 商店库", QUESTION,
                 status, null, null, null, 0, null, null, null, NOW, NOW,
-                null, null, null, null);
+                null, null, null, null,
+                Boolean.TRUE, 0, null, false, null, 0, null);
     }
 
     private static AgentStep step(StepStatus status, String sql, int version, int repairCount) {

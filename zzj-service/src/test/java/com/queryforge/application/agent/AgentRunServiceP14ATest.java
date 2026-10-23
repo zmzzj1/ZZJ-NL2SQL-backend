@@ -38,6 +38,7 @@ import com.queryforge.application.query.SqlExecutionService;
 import com.queryforge.infrastructure.persistence.AgentRunRepository;
 import com.queryforge.infrastructure.redis.AgentPlanStore;
 import com.queryforge.infrastructure.redis.ApprovalSessionStore;
+import com.queryforge.infrastructure.redis.PlanReviewSessionStore;
 import com.queryforge.shared.error.ApiException;
 import com.queryforge.shared.error.ErrorCode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -106,6 +107,10 @@ class AgentRunServiceP14ATest {
     @Mock
     private ApprovalSessionStore approvalSessionStore;
     @Mock
+    private PlanReviewSessionStore planReviewSessionStore;
+    @Mock
+    private PlanReviewGate planReviewGate;
+    @Mock
     private ToolAssistantAgent toolAssistant;
     @Mock
     private AgentRunToolPolicy toolPolicy;
@@ -154,7 +159,8 @@ class AgentRunServiceP14ATest {
                 repository, conversationService, connectionService, sqlAssistant, objectMapper,
                 knowledgeService, configResolver, graphStateService, approvalSessionStore,
                 engine, contextAssembler, failureHandler, planState, roleRecorder, llmLimiter,
-                new ToolInvocationRequestGuard());
+                new ToolInvocationRequestGuard(),
+                planReviewGate, planReviewSessionStore, planner);
         lenient().when(repository.tryIncrementLlmCalls(anyLong(), anyInt())).thenReturn(1);
     }
 
@@ -172,7 +178,7 @@ class AgentRunServiceP14ATest {
 
     private PreparedRun preparedWithTool(String toolName, Map<String, Object> args) {
         return new PreparedRun(RUN_ID, USER_ID, CONVERSATION_ID, CONNECTION_ID, "sql_demo_a", QUESTION,
-                ResolvedAgentConfig.defaults(), null, new ToolInvocationRequest(toolName, args));
+                ResolvedAgentConfig.defaults(), null, new ToolInvocationRequest(toolName, args), Boolean.TRUE);
     }
 
     private String start(PreparedRun prepared) throws Exception {
@@ -279,7 +285,7 @@ class AgentRunServiceP14ATest {
         when(repository.findSteps(RUN_ID)).thenReturn(List.of());
         when(toolPolicy.allowsStrictly(RUN_ID, "describe_schema")).thenReturn(true);
         when(repository.startNonSqlStep(STEP_ID)).thenReturn(1);
-        when(toolAssistant.invoke(any(), any())).thenReturn(
+        when(toolAssistant.invoke(any(), any(), any(), any())).thenReturn(
                 new ToolInvocationResult("describe_schema", Map.of("tables", List.of("shop_orders")), 12));
         when(toolOutputSanitizer.summarize(any())).thenReturn("{\"tables\":[\"shop_orders\"]}");
         when(conversationService.memorySummary(CONVERSATION_ID)).thenReturn(null);
@@ -294,7 +300,7 @@ class AgentRunServiceP14ATest {
         verify(sqlAssistant, never()).generateSql(anyString(), anyString(), anyString(), anyString(),
                 anyString(), anyString(), anyString());
         // 恰好一次工具调用，经角色能力 + ToolRegistry 双层授权。
-        verify(toolAssistant).invoke(any(), any());
+        verify(toolAssistant).invoke(any(), any(), any(), any());
         verify(toolPolicy).allowsStrictly(RUN_ID, "describe_schema");
         verify(repository).insertStep(RUN_ID, 1, "调用工具 describe_schema", null, "TOOL_ASSISTANT");
         verify(repository).startNonSqlStep(STEP_ID);
@@ -376,7 +382,7 @@ class AgentRunServiceP14ATest {
         assertThat(org.assertj.core.api.Assertions.catchThrowable(() -> service.prepareStart(
                 USER_ID, new CreateAgentRunRequest(
                         CONVERSATION_ID, CONNECTION_ID, "查看表结构", null, null, null, null,
-                        new ToolInvocationRequest("describe schema; drop", Map.of())))))
+                        new ToolInvocationRequest("describe schema; drop", Map.of()), null))))
                 .isInstanceOfSatisfying(ApiException.class, ex -> {
                     assertThat(ex.getErrorCode()).isEqualTo(ErrorCode.VALIDATION_ERROR);
                     assertThat(ex.getStatus().value()).isEqualTo(400);

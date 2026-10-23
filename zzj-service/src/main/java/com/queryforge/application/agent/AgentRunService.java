@@ -15,11 +15,14 @@ import com.queryforge.domain.agent.AgentStreamEvents;
 import com.queryforge.domain.agent.ApproveAgentStepRequest;
 import com.queryforge.domain.agent.CreateAgentRunRequest;
 import com.queryforge.domain.agent.CreateAgentRunRequest.ToolInvocationRequest;
+import com.queryforge.domain.agent.PlanDecisionRequest;
+import com.queryforge.domain.agent.PlanReviewStatus;
 import com.queryforge.domain.agent.RunStatus;
 import com.queryforge.domain.agent.StepStatus;
 import com.queryforge.domain.agent.graph.GraphNode;
 import com.queryforge.infrastructure.persistence.AgentRunRepository;
 import com.queryforge.infrastructure.redis.ApprovalSessionStore;
+import com.queryforge.infrastructure.redis.PlanReviewSessionStore;
 import com.queryforge.infrastructure.web.SseEventWriter;
 import com.queryforge.domain.knowledge.KnowledgeSearchResponse;
 import com.queryforge.application.knowledge.KnowledgeService;
@@ -79,6 +82,9 @@ public class AgentRunService {
     private final AgentRoleRecorder roleRecorder;
     private final AgentLlmCallLimiter llmLimiter;
     private final ToolInvocationRequestGuard toolInvocationGuard;
+    private final PlanReviewGate planReviewGate;
+    private final PlanReviewSessionStore planReviewSessionStore;
+    private final AgentPlanner planner;
 
     public AgentRunService(
             AgentRunRepository repository,
@@ -96,7 +102,10 @@ public class AgentRunService {
             AgentPlanStateService planState,
             AgentRoleRecorder roleRecorder,
             AgentLlmCallLimiter llmLimiter,
-            ToolInvocationRequestGuard toolInvocationGuard) {
+            ToolInvocationRequestGuard toolInvocationGuard,
+            PlanReviewGate planReviewGate,
+            PlanReviewSessionStore planReviewSessionStore,
+            AgentPlanner planner) {
         this.repository = repository;
         this.conversationService = conversationService;
         this.connectionService = connectionService;
@@ -113,6 +122,9 @@ public class AgentRunService {
         this.roleRecorder = roleRecorder;
         this.llmLimiter = llmLimiter;
         this.toolInvocationGuard = toolInvocationGuard;
+        this.planReviewGate = planReviewGate;
+        this.planReviewSessionStore = planReviewSessionStore;
+        this.planner = planner;
     }
 
     public PreparedRun prepareStart(Long userId, CreateAgentRunRequest request) {
@@ -128,14 +140,15 @@ public class AgentRunService {
         Long runId = repository.insertRun(
                 userId, conversationId, connection.id(), connection.name(), question, RunStatus.PLANNING,
                 config.agentId(), config.agentVersionId(),
-                writeJson(config.skillVersionRefs()), writeJson(config.allowedToolIds()));
+                writeJson(config.skillVersionRefs()), writeJson(config.allowedToolIds()),
+                request.autoConfirm());
         graphStateService.initialize(
                 runId, userId, request.workspaceId(), connection.id(),
                 config.agentId(), config.agentVersionId(), writeJson(config.skillVersionRefs()), 0);
         conversationService.appendMessage(conversationId, MessageRole.USER, question, MessageStatus.COMPLETED);
         return new PreparedRun(
                 runId, userId, conversationId, connection.id(), connection.database(), question, config,
-                request.workspaceId(), toolInvocation);
+                request.workspaceId(), toolInvocation, request.autoConfirm());
     }
 
     /** 解析运行配置：显式指定版本 > 草稿（测试） > Agent 当前发布版 > 默认。 */
@@ -235,13 +248,8 @@ public class AgentRunService {
                 }
                 case COMPLEX, MEDIUM -> {
                     // MEDIUM 是分类不可用时的安全降级：继续走 Planner，不静默放行未验证 SQL。
-                    graphStateService.enter(run.runId(), GraphNode.PLANNING, writer);
-                    AgentPlan plan = engine.plan(run, schema, writer, context);
-                    if (plan != null) {
-                        graphStateService.enter(run.runId(), GraphNode.CONTEXT_BUILDING, writer);
-                        graphStateService.enter(run.runId(), GraphNode.RUNNING, writer);
-                        engine.executePlan(run, schema, plan, writer, context);
-                    }
+                    // P14-D：Planner 产出合法计划后先过 Gate（autoConfirm 跳过），再决定是否暂停审核。
+                    runComplexPlan(run, schema, writer, context);
                 }
                 case TOOL_INVOCATION -> {
                     // 模型不得返回该值；显式工具分支已在上面处理，此处只做安全拒绝。
@@ -285,6 +293,277 @@ public class AgentRunService {
                 run.conversationId(), MessageRole.ASSISTANT, answer, MessageStatus.COMPLETED);
         writer.event("run.completed", new AgentStreamEvents.RunCompleted(run.runId(), answer));
         engine.updateSessionMemory(run, answer);
+    }
+
+    /**
+     * P14-D：COMPLEX/MEDIUM 路由的统一编排。Planner 产出合法计划后先过 Gate（autoConfirm 跳过），
+     * 再决定：跳过/无需审核则继续原执行链；需要审核则持久化计划并暂停等待，不派发任何 Worker。
+     */
+    private void runComplexPlan(PreparedRun run, String schema, SseEventWriter writer, EffectiveRunContext context)
+            throws IOException {
+        graphStateService.enter(run.runId(), GraphNode.PLANNING, writer);
+        AgentPlan plan = engine.plan(run, schema, writer, context);
+        if (plan == null) {
+            return; // 计划不合法时 engine 已按失败收敛
+        }
+        // 审核模式取自本次运行创建时固定的快照，不回查数据库、不读取前端新值。
+        boolean autoConfirm = !Boolean.FALSE.equals(run.planAutoConfirm());
+        graphStateService.enter(run.runId(), GraphNode.HITL_GATE, writer);
+        if (autoConfirm) {
+            // autoConfirm=true：跳过 Gate 模型与人工审核，仍走原有 SQL 审批/沙箱/报告安全边界。
+            persistAndExecute(run, schema, plan, writer, context);
+            return;
+        }
+        // Gate 需要运行实体（累计拒绝次数等）：仅在真正要评估时才回查，且仍按用户归属校验。
+        PlanReviewDecision decision = planReviewGate.evaluate(
+                requireRun(run.userId(), run.runId()),
+                context == null ? "" : context.effectiveContext(), plan);
+        writer.event("plan.review_evaluated", new AgentStreamEvents.PlanReviewEvaluated(
+                run.runId(), decision.needsReview(), decision.reasonCode(), decision.modelEvaluated()));
+        if (!decision.needsReview()) {
+            // Gate 判定无需人工审核（或 Gate 不可用时降级）：如实记录，继续原执行链，不出现伪造等待状态。
+            PlanReviewStatus status = decision.modelEvaluated()
+                    ? PlanReviewStatus.NOT_REQUIRED : PlanReviewStatus.EVAL_UNAVAILABLE;
+            repository.markPlanReviewStatus(run.runId(), run.userId(), status);
+            persistAndExecute(run, schema, plan, writer, context);
+            return;
+        }
+        // 需要人工审核：先把已校验计划落盘（使刷新/恢复可展示），再原子进入等待并登记短期会话。
+        engine.persistPlan(run, plan, writer);
+        int version = repository.enterPlanReviewAwaiting(run.runId(), run.userId(), decision.reason());
+        if (version < 0) {
+            failureHandler.failRunWithEvent(run.runId(), "PLAN_REVIEW_CONFLICT", "计划审核状态冲突，请重新发起", writer);
+            return;
+        }
+        planReviewSessionStore.register(run.runId(), run.userId(), run.conversationId(), run.workspaceId(),
+                run.connectionId(), version, "AGENT_RUN");
+        graphStateService.enter(run.runId(), GraphNode.WAITING_PLAN_REVIEW, writer);
+        writer.event("plan.review_required", new AgentStreamEvents.PlanReviewRequired(
+                run.runId(), version, decision.reason(), 0,
+                repository.findSteps(run.runId()).stream()
+                        .map(s -> new AgentStreamEvents.PlanReviewStep(
+                                s.id(), s.sequence(), s.objective(), s.agentRole(), s.dependsOn()))
+                        .toList()));
+        // 流自然结束；Run 非终态，未派发任何 Worker，前端可刷新后提交审核决定。
+    }
+
+    /** 持久化计划并启动 Worker（autoConfirm 与 Gate 免审共用）。 */
+    private void persistAndExecute(PreparedRun run, String schema, AgentPlan plan, SseEventWriter writer,
+                                  EffectiveRunContext context) throws IOException {
+        graphStateService.enter(run.runId(), GraphNode.CONTEXT_BUILDING, writer);
+        graphStateService.enter(run.runId(), GraphNode.RUNNING, writer);
+        engine.executePlan(run, schema, plan, writer, context);
+    }
+
+    /**
+     * P14-D：计划审核决定（批准/拒绝）的一次性领取与续跑/重规划。
+     * 同一审核版本最多一个决定胜出：Redis 令牌优先、MySQL CAS 兜底，二者均不自动批准。
+     */
+    public PreparedPlanDecision preparePlanDecision(Long userId, Long runId, PlanDecisionRequest request) {
+        Integer versionObj = request.hitlVersion();
+        if (versionObj == null) {
+            throw new ApiException(ErrorCode.VALIDATION_ERROR, HttpStatus.BAD_REQUEST, "hitlVersion 不能为空");
+        }
+        int hitlVersion = versionObj;
+        boolean approved = Boolean.TRUE.equals(request.approved());
+        AgentRun run = requireRun(userId, runId);
+        if (run.status() != RunStatus.WAITING_PLAN_REVIEW) {
+            throw conflict("当前运行不处于计划审核等待状态");
+        }
+        PlanReviewStatus current = PlanReviewStatus.parse(run.planReviewStatus());
+        if (current != PlanReviewStatus.AWAITING) {
+            throw conflict("当前审核版本已处理，请刷新后操作");
+        }
+        if (run.planReviewVersion() != hitlVersion) {
+            throw conflict("审核版本已过期，请刷新后重新操作");
+        }
+
+        PlanReviewSessionStore.Claim tokenClaim = planReviewSessionStore.claim(runId, userId, hitlVersion);
+        if (tokenClaim == PlanReviewSessionStore.Claim.FORBIDDEN) {
+            throw new ApiException(ErrorCode.FORBIDDEN, HttpStatus.FORBIDDEN, "无权处理该运行");
+        }
+        if (tokenClaim == PlanReviewSessionStore.Claim.EXPIRED
+                || tokenClaim == PlanReviewSessionStore.Claim.STALE_VERSION) {
+            throw conflict("审核会话已过期或版本不匹配，请刷新后重新操作");
+        }
+        // UNAVAILABLE：Redis 不可用/锁争用，交给下方 MySQL CAS 独立裁决，不伪造已领取。
+        String feedback = request.feedback() == null ? "" : request.feedback();
+        if (approved) {
+            if (repository.claimPlanApproval(runId, userId, hitlVersion) == 0) {
+                throw conflict("该审核版本已被处理，不能重复执行");
+            }
+        } else if (repository.claimPlanRejection(
+                runId, userId, hitlVersion, feedback, "用户拒绝计划并要求重规划") == 0) {
+            throw conflict("该审核版本已被处理，不能重复执行");
+        }
+        planReviewSessionStore.remove(runId, hitlVersion);
+        int rejectionCount = approved ? run.planRejectionCount() : run.planRejectionCount() + 1;
+        return new PreparedPlanDecision(userId, runId, run, hitlVersion, approved, feedback, rejectionCount);
+    }
+
+    /** P14-D：按已领取的决定执行——批准则从持久化原计划续跑，拒绝则重规划或终结。 */
+    public void continuePlanReview(PreparedPlanDecision planDecision, OutputStream outputStream) {
+        Long userId = planDecision.userId();
+        Long runId = planDecision.runId();
+        AgentRun run = planDecision.run();
+        int hitlVersion = planDecision.hitlVersion();
+        SseEventWriter writer = new SseEventWriter(outputStream, objectMapper);
+        ModelRouteContextHolder.set(new ModelRouteContextHolder.Context(userId, null, null, runId, null, null));
+        try {
+            if (planDecision.approved()) {
+                graphStateService.enter(runId, GraphNode.CONTEXT_BUILDING, writer);
+                graphStateService.enter(runId, GraphNode.RUNNING, writer);
+                repository.transitionRunStatus(runId, RunStatus.RUNNING);
+                writer.event("plan.review_decided", new AgentStreamEvents.PlanReviewDecided(
+                        runId, hitlVersion, true, run.planRejectionCount()));
+                // 从已持久化的原计划（禁止重新生成新计划冒充所批准版本）续跑。
+                PreparedRun prepared = continuationRun(run, userId);
+                String schema = connectionService.schemaContext(userId, run.connectionId());
+                EffectiveRunContext ctx = engine.rebuildContext(prepared, writer, schema);
+                engine.resumePersistedPlan(prepared, schema, writer, ctx);
+                return;
+            }
+
+            // 拒绝路径：拒绝计数已 +1、旧待定计划作废，根据计数决定终结或重规划。
+            int rejectionCount = planDecision.rejectionCount();
+            writer.event("plan.review_decided", new AgentStreamEvents.PlanReviewDecided(
+                    runId, hitlVersion, false, rejectionCount));
+
+            if (rejectionCount >= 3) {
+                // 达到三次拒绝上限：终结 Run，绝不派发 Worker。
+                graphStateService.enter(runId, GraphNode.FAILED, writer);
+                repository.failPlanReview(runId, "PLAN_REJECTED_MAX",
+                        "计划已连续 " + rejectionCount + " 次被拒绝，运行终止");
+                writer.event("plan.review_failed", new AgentStreamEvents.PlanReviewFailed(
+                        runId, "PLAN_REJECTED_MAX", "计划已连续 " + rejectionCount + " 次被拒绝，运行终止"));
+                planReviewSessionStore.removeRun(runId);
+                planState.clear(runId);
+                return;
+            }
+
+            // 1 或 2 次拒绝：回 PLANNING，丢弃尚未执行的旧计划，注入反馈重规划并再次过 Gate。
+            repository.transitionRunStatus(runId, RunStatus.PLANNING);
+            graphStateService.enter(runId, GraphNode.PLANNING, writer);
+            List<AgentPlan.Step> rejectedSteps = repository.findSteps(runId).stream()
+                    .map(s -> new AgentPlan.Step(s.objective(), s.agentRole(), s.dependsOn()))
+                    .toList();
+            repository.deletePendingSteps(runId);
+            PreparedRun prepared = continuationRun(run, userId);
+            String schema = connectionService.schemaContext(userId, run.connectionId());
+            EffectiveRunContext ctx = engine.rebuildContext(prepared, writer, schema);
+            String feedback = planDecision.feedback();
+            AgentPlan newPlan;
+            try {
+                newPlan = llmLimiter.count(runId, () -> planner.replan(
+                        runId, run.question(), schema, ctx == null ? "" : ctx.effectiveContext(),
+                        rejectedSteps, feedback, rejectionCount));
+            } catch (ApiException ex) {
+                graphStateService.enter(runId, GraphNode.FAILED, writer);
+                repository.failPlanReview(runId, ex.getErrorCode().name(), ex.getMessage());
+                writer.event("plan.review_failed", new AgentStreamEvents.PlanReviewFailed(
+                        runId, ex.getErrorCode().name(), ex.getMessage()));
+                planReviewSessionStore.removeRun(runId);
+                planState.clear(runId);
+                return;
+            }
+            if (!newPlan.answerable() || newPlan.steps().isEmpty()) {
+                graphStateService.enter(runId, GraphNode.FAILED, writer);
+                repository.failPlanReview(runId, "AGENT_UNANSWERABLE", "重规划未能产生可执行计划，运行终止");
+                writer.event("plan.review_failed", new AgentStreamEvents.PlanReviewFailed(
+                        runId, "AGENT_UNANSWERABLE", "重规划未能产生可执行计划，运行终止"));
+                planReviewSessionStore.removeRun(runId);
+                planState.clear(runId);
+                return;
+            }
+            // 新计划再次过 Gate（使用 Run 固定的 autoConfirm 值）。
+            PlanReviewDecision decision = planReviewGate.evaluate(
+                    run, ctx == null ? "" : ctx.effectiveContext(), newPlan);
+            writer.event("plan.review_evaluated", new AgentStreamEvents.PlanReviewEvaluated(
+                    runId, decision.needsReview(), decision.reasonCode(), decision.modelEvaluated()));
+            graphStateService.enter(runId, GraphNode.HITL_GATE, writer);
+            if (!decision.needsReview()) {
+                PlanReviewStatus status = decision.modelEvaluated()
+                        ? PlanReviewStatus.NOT_REQUIRED : PlanReviewStatus.EVAL_UNAVAILABLE;
+                repository.markPlanReviewStatus(runId, userId, status);
+                graphStateService.enter(runId, GraphNode.CONTEXT_BUILDING, writer);
+                graphStateService.enter(runId, GraphNode.RUNNING, writer);
+                engine.executePlan(prepared, schema, newPlan, writer, ctx);
+                return;
+            }
+            engine.persistPlan(prepared, newPlan, writer);
+            int newVersion = repository.enterPlanReviewAwaiting(runId, userId, decision.reason());
+            if (newVersion < 0) {
+                failureHandler.failRunWithEvent(runId, "PLAN_REVIEW_CONFLICT", "计划重审状态冲突，请重新发起", writer);
+                return;
+            }
+            planReviewSessionStore.register(runId, userId, prepared.conversationId(), prepared.workspaceId(),
+                    prepared.connectionId(), newVersion, "AGENT_RUN");
+            graphStateService.enter(runId, GraphNode.WAITING_PLAN_REVIEW, writer);
+            writer.event("plan.replanned", new AgentStreamEvents.PlanReplanned(
+                    runId, newVersion, rejectionCount,
+                    repository.findSteps(runId).stream()
+                            .map(s -> new AgentStreamEvents.PlanReviewStep(
+                                    s.id(), s.sequence(), s.objective(), s.agentRole(), s.dependsOn()))
+                            .toList()));
+            // 流自然结束；新版本待审核，Run 非终态。
+        } catch (IOException ex) {
+            log.info("agent_client_closed runId={} phase=plan_review", runId);
+            failureHandler.cancelRunQuietly(userId, runId);
+        } catch (RuntimeException ex) {
+            log.warn("agent_plan_review_failed runId={} message={}", runId, ex.getMessage());
+            String code = ex instanceof ApiException api ? api.getErrorCode().name() : "PLAN_REVIEW_FAILED";
+            String message = ex instanceof ApiException api && api.getMessage() != null
+                    ? api.getMessage() : "计划审核处理失败";
+            try {
+                graphStateService.enter(runId, GraphNode.FAILED, writer);
+                repository.failPlanReview(runId, code, message);
+                writer.event("plan.review_failed", new AgentStreamEvents.PlanReviewFailed(runId, code, message));
+            } catch (IOException | RuntimeException ignore) {
+                // 事件发送失败不掩盖主流程错误
+            }
+            planReviewSessionStore.removeRun(runId);
+            planState.clear(runId);
+        } finally {
+            ModelRouteContextHolder.clear();
+        }
+    }
+
+    /** 从已持久化 Run 派生续跑 PreparedRun（配置/数据库/连接均来自服务端事实，绝不接受客户端伪造）。 */
+    private PreparedRun continuationRun(AgentRun run, Long userId) {
+        String database = databaseOf(userId, run);
+        ResolvedAgentConfig config = configOf(run);
+        return new PreparedRun(run.id(), userId, run.conversationId(), run.connectionId(),
+                database, run.question(), config);
+    }
+
+    /** 构造 RunDetail 的计划审核视图（刷新恢复来源）。未触发 Gate 的旧 Run 返回 null。 */
+    private AgentRunResponse.PlanReviewView toPlanReviewView(AgentRun run) {
+        boolean triggered = run.planReviewStatus() != null
+                || run.planReviewVersion() > 0
+                || run.planRejectionCount() > 0
+                || Boolean.TRUE.equals(run.planReviewRequired());
+        if (!triggered) {
+            return null;
+        }
+        boolean required = Boolean.TRUE.equals(run.planReviewRequired());
+        PlanReviewStatus status = PlanReviewStatus.parse(run.planReviewStatus());
+        List<AgentRunResponse.PlanStepView> planSteps = java.util.List.of();
+        if (required) {
+            planSteps = repository.findSteps(run.id()).stream()
+                    .filter(s -> s.status() == StepStatus.PENDING || s.status() == StepStatus.RUNNING)
+                    .map(s -> new AgentRunResponse.PlanStepView(
+                            s.id(), s.sequence(), s.objective(), s.agentRole(), s.dependsOn()))
+                    .toList();
+        }
+        boolean autoConfirm = run.planAutoConfirm() != null && run.planAutoConfirm();
+        return new AgentRunResponse.PlanReviewView(
+                required,
+                status == null ? null : status.name(),
+                run.planReviewVersion(),
+                run.planReviewReason() == null ? "" : run.planReviewReason(),
+                run.planRejectionCount(),
+                autoConfirm,
+                planSteps);
     }
 
     /** 授权知识概要：仅使用当前 userId/connectionId/workspaceId 授权范围内的检索结果。 */
@@ -415,8 +694,9 @@ public class AgentRunService {
             repository.cancelPendingSteps(runId);
         }
         graphStateService.enter(runId, GraphNode.CANCELED, null);
-        // P12 S4：取消后解除该运行全部待审批令牌与计划快照。
+        // P12 S4：取消后解除该运行全部待审批令牌与计划快照（含计划级 HITL 会话）。
         approvalSessionStore.removeRun(runId);
+        planReviewSessionStore.removeRun(runId);
         planState.clear(runId);
     }
 
@@ -429,7 +709,8 @@ public class AgentRunService {
                 parseSources(run.knowledgeSources()), run.llmCallCount(),
                 run.summary(), run.errorCode(), run.errorMessage(),
                 run.createdAt(), run.updatedAt(), steps.stream().map(AgentRunService::toStepResponse).toList(),
-                repository.findGraphCheckpointJson(run.id()).orElse(null));
+                repository.findGraphCheckpointJson(run.id()).orElse(null),
+                toPlanReviewView(run));
     }
 
     public List<AgentRunSummaryResponse> listByConversation(Long userId, Long conversationId) {

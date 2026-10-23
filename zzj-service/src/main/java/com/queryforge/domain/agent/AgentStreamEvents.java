@@ -150,4 +150,38 @@ public final class AgentStreamEvents {
     /** P14-C：报告真实写入 reports 表后发送，reportId 可经详情接口鉴权访问。 */
     public record ReportReady(Long runId, Long stepId, Long reportId, String title) {
     }
+
+    // ---------------------------------------------------------------- P14-D：计划级 HITL 审核事件
+
+    /** 计划级 Gate 评估结果（无论是否需要人工审核都如实记录判定）。 */
+    public record PlanReviewEvaluated(Long runId, boolean required, String reasonCode, boolean modelEvaluated) {
+    }
+
+    /** 进入计划审核等待：checkpoint 与待审核会话都已持久化后发送，流随后自然结束（不发送 run.completed）。 */
+    public record PlanReviewRequired(Long runId, int hitlVersion, String reason, int rejectionCount,
+                                    List<PlanReviewStep> steps) {
+    }
+
+    /** 服务端已成功领取/记录审核决定（批准或拒绝）。 */
+    public record PlanReviewDecided(Long runId, int hitlVersion, boolean approved, int rejectionCount) {
+    }
+
+    /** 旧计划已安全替换并持久化新计划（拒绝后重规划）。 */
+    public record PlanReplanned(Long runId, int newHitlVersion, int rejectionCount, List<PlanReviewStep> steps) {
+    }
+
+    /** 无法进行审核恢复或重规划时，准确错误（不能覆盖真实已终结 Run）。 */
+    public record PlanReviewFailed(Long runId, String code, String message) {
+    }
+
+    /** 计划审核可展示的步骤摘要（禁止夹带 SQL 候选、凭据或内部 Prompt）。 */
+    public record PlanReviewStep(Long stepId, int sequence, String objective, String agentRole, Integer dependsOn) {
+    }
+
+    /**
+     * P14-E：MCP 工具参数经 LLM 自动修复的轻量元数据（不含修正后的参数原文）。
+     * 仅用于让前端提示“参数已被自动修正”，diagnostic 为触发的校验错误摘要。
+     */
+    public record ToolRepair(Long runId, Long stepId, String toolName, int attempt, String diagnostic) {
+    }
 }

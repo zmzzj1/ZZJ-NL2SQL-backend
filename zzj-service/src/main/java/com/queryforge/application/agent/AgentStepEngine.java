@@ -277,7 +277,15 @@ public class AgentStepEngine {
                 run.userId(), toolName, run.conversationId(), run.runId(), stepId, null, null);
         ToolInvocationResult result;
         try {
-            result = toolAssistant.invoke(invocation, request.args());
+            result = toolAssistant.invoke(invocation, request.args(), null,
+                    (attempt, diagnostic) -> {
+                        try {
+                            writer.event("tool.repair", new AgentStreamEvents.ToolRepair(
+                                    run.runId(), stepId, toolName, attempt, diagnostic));
+                        } catch (IOException ignored) {
+                            // 修复元数据为可选信息，发送失败不阻断主流程
+                        }
+                    });
         } catch (ApiException ex) {
             writer.event("agent.completed", new AgentStreamEvents.AgentCompleted(
                     run.runId(), "TOOL_ASSISTANT", TOOL_ACTIVITY, "FAILED"));
@@ -366,6 +374,15 @@ public class AgentStepEngine {
 
     public void executePlan(PreparedRun run, String schema, AgentPlan plan, SseEventWriter writer,
                             EffectiveRunContext context) throws IOException {
+        List<AgentStep> steps = persistPlan(run, plan, writer);
+        startFirstReadyStep(run, schema, writer, context, steps);
+    }
+
+    /**
+     * P14-D：仅持久化计划步骤（PENDING）+ 发出 plan.ready + 保存短期快照；不启动执行。
+     * 供计划级 Gate 在进入 WAITING_PLAN_REVIEW 之前把计划落盘，使刷新/恢复能展示等待中的计划。
+     */
+    public List<AgentStep> persistPlan(PreparedRun run, AgentPlan plan, SseEventWriter writer) throws IOException {
         List<AgentStep> steps = createSteps(run.runId(), plan);
         for (AgentStep step : steps) {
             String role = step.agentRole() == null ? ROLE_DATA_ANALYST : step.agentRole();
@@ -379,6 +396,21 @@ public class AgentStepEngine {
                         .toList()));
         // P12 S4：计划短期状态入 Redis（DB agent_steps 仍为事实来源）。
         planState.save(run.runId(), steps);
+        return steps;
+    }
+
+    /**
+     * P14-D：计划批准后/重规划后，从已持久化的 PENDING 步骤中启动第一个就绪步骤。
+     * 跨请求恢复时由调用方先用服务端来源重建上下文，绝不信任客户端内存中的压缩结果。
+     */
+    public void resumePersistedPlan(PreparedRun run, String schema, SseEventWriter writer, EffectiveRunContext context)
+            throws IOException {
+        List<AgentStep> steps = repository.findSteps(run.runId());
+        startFirstReadyStep(run, schema, writer, context, steps);
+    }
+
+    private void startFirstReadyStep(PreparedRun run, String schema, SseEventWriter writer,
+                                    EffectiveRunContext context, List<AgentStep> steps) throws IOException {
         Optional<AgentStep> first = nextReadyStep(steps);
         if (first.isEmpty()) {
             failureHandler.failRunWithEvent(run.runId(), "AGENT_PLAN_INVALID", "计划没有可执行的步骤", writer);
@@ -1184,9 +1216,9 @@ public class AgentStepEngine {
 
     /**
      * P14-A：跨审批续跑时从服务端来源重建有效上下文（最近消息、会话摘要、授权 Schema/知识）。
-     * 不读取任何客户端回传的压缩结果。
+     * 不读取任何客户端回传的压缩结果。供计划审批续跑复用。
      */
-    private EffectiveRunContext rebuildContext(PreparedRun run, SseEventWriter writer, String schema)
+    public EffectiveRunContext rebuildContext(PreparedRun run, SseEventWriter writer, String schema)
             throws IOException {
         List<String> recent = conversationService.recentCompletedMessages(run.conversationId(), RECENT_TURNS);
         String memory = conversationService.memorySummary(run.conversationId());

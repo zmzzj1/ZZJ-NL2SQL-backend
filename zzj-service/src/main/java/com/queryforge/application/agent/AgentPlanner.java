@@ -60,6 +60,47 @@ public class AgentPlanner {
         return parse(raw);
     }
 
+    /**
+     * P14-D：计划被用户拒绝后的重新规划。复用 {@link #PLANNER_SYSTEM} 的合法结构化契约，
+     * 注入用户原始问题、被拒绝计划的受控摘要、用户修改意见与拒绝次数。
+     *
+     * <p>用户修改意见只影响任务意图与计划步骤，不得覆盖系统安全约束/角色白名单/数据源授权；
+     * 解析与校验（角色/依赖/步骤预算）复用既有逻辑，非法计划会抛 {@code ApiException}，
+     * 由调用方按失败处理，绝不回用已被拒绝的计划。
+     *
+     * @throws ApiException 模型返回的重新规划不合法（角色/依赖越界或步骤超限）
+     */
+    public AgentPlan replan(Long runId, String originalQuestion, String authorizedSchema, String effectiveContext,
+                           List<AgentPlan.Step> rejectedSteps, String feedback, int rejectionCount) {
+        String rejectedPlanText = renderRejected(rejectedSteps);
+        String raw = LlmTextCollector.collect(
+                llmClient.openChat(
+                        AgentPrompts.PLANNER_SYSTEM,
+                        AgentPrompts.planReplanUser(originalQuestion, rejectedPlanText, feedback,
+                                rejectionCount, effectiveContext, properties.maxSteps())),
+                objectMapper);
+        return parse(raw);
+    }
+
+    /** 把被拒绝计划渲染为 Gate/Planner 可读的受控摘要（仅步骤/角色/依赖，不含任何执行产物）。 */
+    private static String renderRejected(List<AgentPlan.Step> rejectedSteps) {
+        if (rejectedSteps == null || rejectedSteps.isEmpty()) {
+            return "（无计划内容）";
+        }
+        StringBuilder sb = new StringBuilder();
+        int i = 0;
+        for (AgentPlan.Step step : rejectedSteps) {
+            i++;
+            sb.append(i).append(". [").append(step.agent() == null ? "SQL_AGENT" : step.agent())
+                    .append("] ").append(step.objective());
+            if (step.dependsOn() != null) {
+                sb.append(" (依赖步骤 ").append(step.dependsOn()).append(")");
+            }
+            sb.append("\n");
+        }
+        return sb.toString();
+    }
+
     /** 供单元测试直接校验解析规则。 */
     AgentPlan parse(String raw) {
         String json = extractJson(raw);
