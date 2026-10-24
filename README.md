@@ -1,301 +1,589 @@
-# QueryForge 后端（真实用户与多数据源）
+# ZZJ-NL2SQL · QueryForge
 
-Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性；P10 新增工作流定时调度与安全 CSV 导出；P11 新增统一 Agent 执行内核；P13 将公开入口拆为 Gateway，新增通过 Dubbo 查询核心业务数据的独立 Admin 服务，并把 Docker Python 隔离执行下沉为可复用 Sandbox 模块；P14-A 完成自适应 Manager 路由、分层上下文真实入模和用户显式工具调用闭环；P14-B/P14-C 新增 SQL 多候选筛选，以及 SQL 审批后衔接隔离 Python 分析与报告生成的依赖链；P14-D/P14-E 新增高风险计划人工审核、拒绝后重规划、用户级 MCP 服务生命周期和工具发现，以及计划内受控工具步骤；P14-ARCH-01 将主执行链收敛为 Spring AI Alibaba StateGraph，并以 Redis checkpoint 支持线程级暂停与恢复。
+<p align="center">
+  <strong>面向业务数据的 Multi-Agent 智能分析平台</strong><br>
+  自然语言提问 → 安全 SQL 查询 → 多 Agent 协作分析 → 图表与报告
+</p>
 
-## 环境要求
+<p align="center">
+  <img alt="Java" src="https://img.shields.io/badge/Java-21-007396?logo=openjdk&logoColor=white">
+  <img alt="Spring Boot" src="https://img.shields.io/badge/Spring_Boot-3.5.6-6DB33F?logo=springboot&logoColor=white">
+  <img alt="Spring AI" src="https://img.shields.io/badge/Spring_AI-1.1.8-6DB33F">
+  <img alt="Spring AI Alibaba" src="https://img.shields.io/badge/Spring_AI_Alibaba_Graph-1.1.2.0-orange">
+  <img alt="MySQL" src="https://img.shields.io/badge/MySQL-8.4-4479A1?logo=mysql&logoColor=white">
+  <img alt="Redis" src="https://img.shields.io/badge/Redis-7.4-DC382D?logo=redis&logoColor=white">
+  <img alt="Docker" src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white">
+</p>
 
-- JDK 21（验证使用 Temurin 21.0.12.1）
-- Maven 3.9+（验证使用 3.9.1）
-- MySQL 8（验证使用 8.4.11）
-- 可选：Docker 运行时（执行模型生成的 Python 分析代码；不可用时失败关闭，不回退宿主机）
-- 可选：OpenAI 兼容模型服务
+<p align="center">
+  <a href="https://github.com/zmzzj1/ZZJ-NL2SQL-front">前端仓库</a> ·
+  <a href="https://github.com/zmzzj1/ZZJ-NL2SQL-backend">后端仓库</a> ·
+  <a href="#-快速开始">快速开始</a> ·
+  <a href="#-系统架构">系统架构</a> ·
+  <a href="#-核心-api">核心 API</a>
+</p>
 
-## 主要能力
+> **项目定位**：将数据库连接、自然语言理解、SQL 生成与审批、数据分析、图表报告、工作流及模型治理整合为一套可追踪的后端系统。重点不是让模型“直接执行任意 SQL”，而是在用户授权范围内完成**可审核、可恢复、可观测**的数据分析任务。
+>
+>
+> **代码基线**：本文以 `main` 分支的 [`003f16f`](https://github.com/zmzzj1/ZZJ-NL2SQL-backend/commit/003f16f39f904141a7d2bb81e26bee80fb7829af)（2026-10-24）为依据。功能说明对应已有实现；运行效果取决于数据库、模型服务及 Docker 等实际环境。
 
-- 会话、消息和查询历史持久化，资源按登录用户隔离。
-- Agent 多步规划、逐步确认执行、限次 SQL 修复、取消与运行恢复；闲聊、澄清、知识解释、简单查询、复杂分析和安全降级均落到真实运行状态。
-- Manager 使用当前问题、授权 Schema/知识摘要和压缩会话历史进行结构化路由；模型分类不可用时安全降级到 Planner，并保留多角色轨迹和 LLM 调用次数限制。
-- 中复杂度 SQL 生成最多三个候选，经只读 Guard 过滤并结合规则分与模型分确定唯一待审批 SQL；简单查询保持单候选路径，调用预算采用原子计数。
-- Agent 步骤支持显式角色与依赖：只有用户批准并真实执行的 SQL 结果才能进入隔离 Python 分析，分析产物再交给报告步骤；分析/报告 ID 和新增 SSE 事件均持久化，失败时不会绕过审批或回退宿主机。
-- Agent 主执行链使用 StateGraph 编排 Manager、Planner、专业 Worker、验证、人工审核与结束节点；运行状态按线程写入 Redis checkpoint，恢复时继续复用持久化计划、步骤和审批事实。
-- 复杂计划可选择进入计划级风险审核：审核状态和版本持久化，批准后才开始执行，拒绝意见用于重新规划；一次性领取、版本校验和拒绝次数上限避免重复提交，且不替代逐条 SQL 审批。
-- 业务知识 CRUD、按连接鉴权检索和会话记忆摘要。
-- 受控工具注册表（只读工具 + 审计）与用户级 MCP 服务管理：支持连接、断开、状态和工具发现；STDIO 只能选择服务端预配置白名单服务，远程 SSE 地址必须通过出站 URL 防护。用户可显式选择一次工具调用，Planner 也可生成携带真实工具身份和受控参数的工具步骤；两条路径都执行参数边界校验、角色能力与 Agent 白名单双层授权、幂等领取和递归脱敏摘要。
-- 隔离 Python 数据分析：`zzj-sandbox` 以普通 JAR 提供一次性 Docker 容器、非 root、禁网、只读根、资源/时间/输出限制和强制清理；运行时不可用时拒绝回退宿主机。另含内置确定性分析器。
-- 结构化图表（table/bar/line/pie）与净化 HTML 报告（CSP + 沙箱预览）。
-- 可视化工作流 DAG（校验、版本化、串行执行、SQL 审批暂停/恢复、SSE）。
-- 工作流定时调度：Cron/时区校验、未来时间预览、启停、幂等触发、数据库租约、misfire/overlap 策略；含 SQL 的运行仍停在审批边界。
-- 查询历史 CSV 导出：重新校验资源权限与 SQL Guard、重新执行受限查询，并防止表格公式注入。
-- Agent Studio：草稿 CRUD、工具白名单、RAG/Memory 策略、Skill 绑定、发布不可变版本、回滚与审计。
-- Skill Registry：CRUD、不可变版本发布、模板白名单变量校验、运行时按相关性选择并注入。
-- 运行配置由 `zzj-service/src/main/java/com/queryforge/application/agent/RuntimeConfigResolver.java` 统一解析，配置真正影响 Manager/Agent Run/Tool Registry；Run 固定版本快照。
-- 工作空间：OWNER/ADMIN/EDITOR/VIEWER 成员角色与资源授权；共享知识或 Agent 不自动授予数据源和 SQL 执行权限。
-- 混合 RAG：关键词、真实 Embedding 向量和 RRF 融合三种模式，命中结果保留来源、版本与分数。
-- 长期记忆：个人/空间作用域、类型、来源、置信度、去重、禁用与检索，并按用户及空间权限隔离。
-- 模型治理：供应商与能力档案、用户/空间/Agent 授权、版本化路由策略、熔断、有界重试和故障转移。
-- 平台管理：模型调用记录、用量与失败分类、配额、管理审计；管理接口仅允许服务端持久化的 PLATFORM_ADMIN。
-- 独立管理服务：经 Gateway 提供管理员用户分页、平台统计概览、账号启停和用户 Token 配额维护；Admin 通过 Dubbo 调用核心 Service，不复制业务数据访问层。
-- 统一状态图：运行节点（ROUTING/PLANNING/CONTEXT_BUILDING/RUNNING/SQL_GENERATION/WAITING_SQL_APPROVAL/SQL_EXECUTION/REPORT_GENERATION/COMPLETED/FAILED/CANCELED 等）带合法性校验，检查点持久化到 `agent_graph_checkpoints`，SSE `node.*` 轨迹与详情恢复同一套状态。
-- 专业角色：Manager/Planner/Data Analyst/Code Analyst/Tool Assistant/Report Assistant 具备角色定义、输入契约与工具白名单，运行时拒绝越权调用；RoleAssigner 的选择结果持久化到步骤并由前端展示。
-- L1–L4 分层上下文：渐进装入、脱敏压缩元数据、预算压力下保留审批/授权/关键事实，Token 估算明确标注为近似值。
-- Spring AI 可选传输层：`app.llm.use-spring-ai=true` 时以 Spring AI ChatClient 作为底层模型传输（`SpringAiModelTransport`），但统一入口仍是 P9 `RoutedLlmClient`（路由/配额/审计/熔断/故障转移不变），绝不替换或绕过。
+---
 
-## 数据库初始化
+## 📖 项目简介
 
-```bash
-# 管理库：用户与连接配置
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/02-management-schema.sql
+**ZZJ-NL2SQL（QueryForge）** 是一套面向结构化数据的 AI 分析平台。用户无需预先编写复杂 SQL，可以连接自己有权限访问的 MySQL 数据源，直接提出业务问题，由系统理解 Schema 与业务知识、选择任务执行路径、生成只读查询，并根据需求执行后续数据分析和报告生成。
 
-# 两个隔离测试库：sql_demo_a(shop_*) / sql_demo_b(blog_*)
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/03-test-databases.sql
+例如，用户可以提问：
 
-# 按版本顺序执行管理库增量脚本
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/04-conversations-history.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/05-agent-runs.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/06-knowledge-memory.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/07-p6-tools-analysis-report-mcp-workflow.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/08-p7-agent-studio-skill.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/09-p8-workspace-rag-memory.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/10-p9-model-governance.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/11-p10-workflow-schedule.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/12-p11-agent-graph.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/14-p13-admin-user-status.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/15-p14c-agent-step-artifacts.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/15-p14-e-mcp-server-lifecycle.sql
-mysql --default-character-set=utf8mb4 -h 127.0.0.1 -P 3306 -u root < zzj-service/src/main/resources/db/16-p14d-plan-hitl.sql
+> “统计最近 30 天各类商品的订单金额，按周分析变化趋势，并生成一份包含异常波动说明的报告。”
+
+系统会结合真实授权的 Schema 和上下文决定执行路径。需要复杂分析时，Planner 拆解任务，Data Scientist 负责生成与验证 SQL，Code Assistant 对已批准的查询结果进行隔离分析，Dashboard 汇总结果；数据库查询始终受只读 Guard、访问权限和人工确认约束。
+
+平台同时提供 SQL 工作台、多数据源连接管理、查询历史、知识与记忆管理、MCP 工具、工作流编排、定时分析以及管理员治理能力。前端使用独立仓库 [ZZJ-NL2SQL-front](https://github.com/zmzzj1/ZZJ-NL2SQL-front)，本仓库专注后端与本地容器编排。
+
+## ✨ 核心能力
+
+| 功能域 | 已实现能力 |
+| --- | --- |
+| **Multi-Agent 分析** | Manager 任务路由、Planner 计划拆解、SQL / 代码 / 工具专业 Worker、Dashboard 汇总；基于 StateGraph 编排，SSE 输出执行轨迹 |
+| **NL2SQL 与 SQL 工作台** | 根据真实 Schema 生成 SQL，JSQLParser 只读检查，查询执行、结果预览、历史记录与 CSV 安全导出 |
+| **复杂 SQL 候选选优** | 复杂任务最多生成 3 个候选；先经 SQL Guard 过滤，再结合规则与模型评分选出唯一待审批 SQL；模型评分失败时按规则降级 |
+| **Human-in-the-Loop** | SQL 逐版本确认；复杂计划可选择风险审核、批准、拒绝反馈及重新规划；审批状态与执行事实持久化 |
+| **Python 隔离分析** | 仅对服务端授权的数据执行 Python；Docker 一次性容器、禁网、非 root、只读根文件系统、资源与超时限制 |
+| **图表与 HTML 报告** | 表格、柱状图、折线图、饼图等结构化结果；分析产物记录、HTML 净化与受限预览 |
+| **知识与长期记忆** | 业务术语、问答示例、关键词 / pgvector / RRF 混合检索；个人与工作空间记忆、来源与版本追溯 |
+| **上下文管理** | L1–L4 分层构建、摘要与按需检索，在预算内优先保留授权边界、审批状态和已确认事实 |
+| **MCP 工具系统** | 服务端工具目录、用户级 MCP Server 管理、STDIO / 远程 SSE 连接、动态发现、参数校验、工具权限与输出脱敏 |
+| **Workflow 与 Schedule** | 可视化 DAG 定义、版本校验、执行历史、节点审批暂停/恢复；Cron、时区、租约与重复触发控制 |
+| **Agent Studio / Skills** | Agent 草稿配置、发布版本、回滚、工具白名单、RAG / Memory 策略、技能模板与运行时选择 |
+| **工作空间与平台治理** | OWNER / ADMIN / EDITOR / VIEWER 权限；模型路由、授权、配额、调用审计、平台用户与账号状态管理 |
+
+### 设计关注点
+
+- **模型输出不等于执行许可**：生成的 SQL 只有通过语法/安全校验、资源鉴权和明确审批后才能查询真实数据。
+- **编排状态与业务事实分开**：StateGraph 与 Redis checkpoint 负责推进和恢复；MySQL 保存运行、步骤、审批、产物及审计事实，减少重复操作造成的副作用。
+- **高风险执行失败关闭**：Docker 沙箱不可用不转到宿主机；远程工具与数据源必须经过受控地址及权限检查。
+- **入口职责清晰**：Gateway 处理服务发现、路径转发和会话校验；Service 保留业务鉴权；Admin 通过 Dubbo RPC 访问业务数据，不直接复制核心数据库访问逻辑。
+- **可解释的过程反馈**：SSE 逐步返回路由、计划、审批、Worker、节点、分析及报告事件，而不仅是最终文本。
+
+---
+
+## 🏗️ 系统架构
+
+### 整体架构
+
+```mermaid
+flowchart TB
+    U["React / Vite 前端<br/>聊天、SQL 工作台、Studio、Workflow"]
+    GW["zzj-gateway<br/>Spring Cloud Gateway / WebFlux<br/>Nacos 发现、会话校验、SSE 转发"]
+    SVC["zzj-service<br/>核心业务与 Agent 执行"]
+    ADM["zzj-admin<br/>用户管理、统计、配额"]
+    RPC["Dubbo RPC / zzj-common 契约"]
+    N["Nacos<br/>服务注册与发现"]
+    MYSQL[("MySQL 8.4<br/>用户、连接、运行与审计")]
+    REDIS[("Redis / Redisson<br/>会话、锁、短期状态、Graph checkpoint")]
+    PG[("PostgreSQL + pgvector<br/>知识与记忆向量")]
+    LLM["模型服务<br/>RoutedLlmClient / Spring AI 可选传输"]
+    DB[("授权的业务 MySQL<br/>只读 SQL")]
+    DOCKER["zzj-sandbox → Docker<br/>Python 受控执行"]
+    MCP["MCP 服务 / 外部工具"]
+
+    U -->|"HTTP / SSE"| GW
+    GW -->|"/api/**"| SVC
+    GW -->|"管理员专用路由"| ADM
+    ADM --> RPC --> SVC
+    GW -.注册与发现.-> N
+    SVC -.注册与发现.-> N
+    ADM -.注册与发现.-> N
+    SVC --> MYSQL
+    SVC --> REDIS
+    SVC --> PG
+    SVC --> LLM
+    SVC -->|"SQL Guard + 授权"| DB
+    SVC --> DOCKER
+    SVC --> MCP
 ```
 
-创建账号（密码由本地管理员设置，不提交仓库）：
+### 服务与模块边界
 
-```sql
-CREATE USER 'platform_app'@'127.0.0.1' IDENTIFIED BY '<management-password>';
-GRANT ALL PRIVILEGES ON sql_platform.* TO 'platform_app'@'127.0.0.1';
-CREATE USER 'demo_a_reader'@'127.0.0.1' IDENTIFIED BY '<a-reader-password>';
-GRANT SELECT ON sql_demo_a.* TO 'demo_a_reader'@'127.0.0.1';
-CREATE USER 'demo_b_reader'@'127.0.0.1' IDENTIFIED BY '<b-reader-password>';
-GRANT SELECT ON sql_demo_b.* TO 'demo_b_reader'@'127.0.0.1';
-FLUSH PRIVILEGES;
+| Maven 模块 | 默认端口 | 职责 |
+| --- | --- | --- |
+| `zzj-gateway` | `8080` | 面向浏览器的统一 `/api/**` 入口、Nacos + LoadBalancer、SSE 超时配置、Redis 登录态只读校验 |
+| `zzj-service` | `8081` | Agent、SQL、连接、知识、工作流、报表、模型、权限等核心业务；默认仅监听本机回环地址 |
+| `zzj-admin` | `8083` | 管理员用户列表、平台概览、账号状态、Token 配额，通过 Dubbo 消费核心业务能力 |
+| `zzj-common` | — | Admin 与 Service 共用的 RPC 接口和序列化 DTO，不承载业务运行时 |
+| `zzj-sandbox` | — | 与 Spring 无关的普通 JAR；封装 Docker Python 执行、限制、清理与错误分类 |
+
+**网关边界**：精确的管理员路由转发至 `zzj-admin`，其他业务路由转发至 `zzj-service`。Gateway 不签发身份、不透传客户端自填的可信用户/角色头，也不会自动重试带副作用的 POST；业务服务继续独立校验资源和操作权限。
+
+### Multi-Agent 执行图
+
+主链路通过 Spring AI Alibaba Graph 的 `StateGraph / CompiledGraph` 编排；图的节点、条件边和终态由 [`AgentGraphFactory`](zzj-service/src/main/java/com/queryforge/application/agent/runtime/AgentGraphFactory.java) 定义。
+
+```mermaid
+flowchart TD
+    START([START]) --> M[Manager]
+    M -->|复杂任务 / 降级| P[Planner]
+    P --> G{Plan HITL Gate}
+    G -->|无需计划审核| M
+    G -->|需要人工审核| H[HITL 暂停 / 恢复]
+    H -->|批准或反馈重规划| M
+    H -->|达到终止条件| END([END])
+    M -->|SQL 步骤| DS[Data Scientist]
+    M -->|Python 分析| CA[Code Assistant]
+    M -->|MCP 工具步骤| TA[Tool Assistant]
+    M -->|汇总与报告| DASH[Dashboard]
+    DS --> M
+    CA --> M
+    TA --> M
+    DASH --> M
+    M -->|闲聊 / 澄清 / 知识解答 / 终态| END
 ```
 
-## 配置
+> 图中的 **HITL Gate 是计划级审核**；**SQL 的逐版本审批是独立的业务边界**。即使 `autoConfirm=true` 跳过可选计划审核，也不会自动放行 SQL。
 
-参考 `.env.example`，通过本机环境变量或外部 Spring 配置提供以下值：
+| Agent / 组件 | 责任 | 代码入口 |
+| --- | --- | --- |
+| **Manager** | 结合问题、授权 Schema、知识和压缩历史分类；调度步骤、汇总状态及决定终态 | [`ManagerRouter`](zzj-service/src/main/java/com/queryforge/application/agent/ManagerRouter.java)、[`AgentGraphNodes`](zzj-service/src/main/java/com/queryforge/application/agent/runtime/AgentGraphNodes.java) |
+| **Planner** | 将复杂请求拆成有角色和依赖关系的执行计划；支持拒绝反馈重规划 | [`AgentPlanner`](zzj-service/src/main/java/com/queryforge/application/agent/AgentPlanner.java) |
+| **Data Scientist** | SQL 生成、候选筛选与审批前准备，调用受控查询能力 | [`DataScientistWorkerAction`](zzj-service/src/main/java/com/queryforge/application/agent/runtime/worker/DataScientistWorkerAction.java) |
+| **Code Assistant** | 对已授权、已执行的数据运行 Python 分析并保存产物 | [`CodeAssistantWorkerAction`](zzj-service/src/main/java/com/queryforge/application/agent/runtime/worker/CodeAssistantWorkerAction.java) |
+| **Tool Assistant** | 按注册目录和权限规则调用 MCP / 内置工具 | [`ToolAssistantWorkerAction`](zzj-service/src/main/java/com/queryforge/application/agent/runtime/worker/ToolAssistantWorkerAction.java) |
+| **Dashboard** | 消费前序步骤结果，生成或汇总报表与最终回答 | [`DashboardWorkerAction`](zzj-service/src/main/java/com/queryforge/application/agent/runtime/worker/DashboardWorkerAction.java) |
+
+#### 路由策略
+
+| 路由 | 典型问题 | 后续路径 |
+| --- | --- | --- |
+| `CHITCHAT` | 闲聊、能力咨询 | Manager 直接回答 |
+| `CLARIFY` | 业务条件不足 | 返回澄清请求，不猜测 SQL |
+| `KNOWLEDGE` | 授权知识问答 | 知识解释路径 |
+| `SIMPLE` | 单条查询即可回答 | SQL 单候选路径 |
+| `COMPLEX` | 多步数据分析、图表或报告 | Planner → 专业 Worker → Dashboard |
+| `MEDIUM` | 分类器异常、超时或无法确定 | 安全降级进入 Planner |
+| `TOOL_INVOCATION` | 用户在界面显式选择工具 | 跳过分类模型，执行一次受控工具调用 |
+
+### 从提问到结果的完整链路
+
+1. **请求进入**：前端携带会话及数据源 ID 请求 `/api/v1/agent/runs/stream`，Gateway 验证已有登录态并转发 SSE。
+2. **鉴权与上下文构建**：Service 校验用户、会话、数据源和工作空间归属，加载 Schema、近期对话、知识、记忆和 Skill。
+3. **Manager 路由**：判断是闲聊、澄清、简单 SQL、复杂分析还是用户显式工具；分类失败会进入受控的 Planner 路径。
+4. **计划与可选审核**：复杂任务分解为结构化步骤；开启计划审核时，风险 Gate 可将运行停在 HITL，等待批准或拒绝反馈。
+5. **执行专业步骤**：Worker 执行受限的 `Thinking → Review → Act → Verify` 循环；SQL 先生成唯一候选并等待用户批准。
+6. **分析与报告**：获批 SQL 的实际查询结果才可流向下游 Python；图表和报告通过持久化工件关联回原始步骤。
+7. **流式展示与恢复**：每个节点产生 SSE 事件；MySQL 保存执行事实，Redis checkpoint 记录图位置，前端可读取运行详情并继续待审核操作。
+
+### 可恢复执行与 Worker 消息总线
+
+- **StateGraph checkpoint**：[`AgentGraphRunner`](zzj-service/src/main/java/com/queryforge/application/agent/runtime/AgentGraphRunner.java) 将 `RedisSaver` 注入编译配置，以 `threadId` 关联 Run；计划级审核使用 `interruptBefore(HITL)` 暂停，并在同一线程状态上恢复。
+- **幂等与一致性**：审批使用 Run / Step 归属、计划版本或 `sqlVersion`、数据库状态更新和受控领取约束；重复提交不应触发同一步骤重复执行。
+- **Worker Loop**：统一执行确定性 Review、动作调用和结果 Verify；只有标为可恢复的失败才进行有界重试，不盲重试可能产生副作用的外部操作。
+- **进程内 Bus**：通过 [`WorkerDispatcher`](zzj-service/src/main/java/com/queryforge/application/agent/runtime/bus/WorkerDispatcher.java) 支持以下三种分派方式：
+
+| `app.agent.dispatch-mode` | 行为 | 适用用途 |
+| --- | --- | --- |
+| `OFF`（默认） | 直接调用 WorkerExecutor | 默认运行 |
+| `BYPASS` | 正常执行仍走直调，同时镜像派发/结果事件；旁路不重复执行 Worker | 观察和校验总线契约 |
+| `SWITCH` | 由 In-JVM Bus 端点队列接收任务，并等待真正的 Worker 回复 | 验证总线中介执行路径 |
+
+> **边界说明**：当前总线使用 JVM 内队列与订阅，**不是 Kafka、RabbitMQ 或跨进程持久化 MQ**。进程终止会丢失在途消息；恢复依赖业务状态与 Graph checkpoint，不宣称消息自身持久化。端点不可用、队列已满或等待结果超时时明确返回失败，不靠双路径重复执行业务来“兜底”。
+
+---
+
+## 🔐 SQL、数据与工具安全
+
+### SQL 生成与执行
+
+```mermaid
+flowchart LR
+    Q["自然语言 + 授权 Schema"] --> GEN["SQL 生成"]
+    GEN --> C{复杂任务?}
+    C -->|否| S["单候选"]
+    C -->|是| M["最多 3 个候选"]
+    M --> GUARD["SQL Guard 过滤"]
+    GUARD --> SCORE["规则 + 模型评分 / 规则回退"]
+    S --> ONE["唯一待确认 SQL"]
+    SCORE --> ONE
+    ONE --> HITL{用户确认当前 sqlVersion?}
+    HITL -->|拒绝| STOP["停止执行"]
+    HITL -->|确认| EXEC["只读 JDBC 执行"]
+    EXEC --> RES["受限结果 + 查询历史"]
+    RES --> DOWN["可选 Python / 图表 / 报告"]
+```
+
+安全策略包括：
+
+- `ReadOnlySqlGuard` 基于 JSQLParser 检查 SQL 类型与危险表达式，拒绝写操作及未授权访问；目标库账号还应仅授予 `SELECT`。
+- 查询使用真实连接 ID 和用户归属，限制返回行数与执行时长；通过独立目标连接池执行，不将模型生成文本直接当作后台管理 SQL。
+- 数据源连接密码采用 AES-256-GCM 加密保存，连接目标有允许的主机/端口范围，防止任意外连。
+- 对于 Agent SQL 步骤，批准请求必须指向当前 `stepId` 与 `sqlVersion`；计划审核不能替代 SQL 审批。
+- 查询历史 CSV 导出重新执行当前有权限的只读查询，并处理电子表格公式注入风险，不直接信任旧结果。
+
+### Docker 沙箱
+
+[`zzj-sandbox`](zzj-sandbox/src/main/java/com/zzj/sandbox/DockerPythonSandboxExecutor.java) 以普通 Java JAR 形式向业务服务提供 `SandboxExecutor` 接口：
+
+```text
+获批的受限数据结果
+    → 生成 / 校验 Python 分析请求
+    → 一次性 Docker 容器（无网络、非 root、只读根、去 capabilities）
+    → 限制内存 / CPU / 进程 / 时长 / 输出
+    → 受控输出目录读取结构化分析产物
+    → 清理容器与临时文件 → 持久化分析结果
+```
+
+Docker 不可用、命令异常或超时时会拒绝执行，**不会自动回退到宿主机执行模型生成的代码**。沙箱隔离是风险缓解措施，而非对不可信代码的绝对安全保证。
+
+### 权限、知识检索与 MCP
+
+- **认证**：Sa-Token 负责登录态，Redisson/Redis 保存会话；Gateway 只读验证，Service 负责最终授权；HttpOnly Cookie 与 CSRF 规则独立生效。
+- **工作空间**：OWNER、ADMIN、EDITOR、VIEWER 四级角色；共享 Agent、知识或 Skill 不自动授予他人的数据源访问权限。
+- **RAG**：关键词检索、真实 Embedding + pgvector 余弦相似度、RRF 融合；按用户、数据源、工作空间执行候选过滤并记录来源与版本。
+- **Memory / Skill**：记忆支持来源、类型、个人/空间作用域与禁用；Skill 是受限的提示词模板，不执行任意脚本、不扩展数据权限。
+- **MCP**：工具发现、参数契约校验、角色和 Agent 白名单双层授权、递归脱敏；STDIO 限制为服务器预配置命令，远程地址经过出站 URL 安全检查。
+- **模型治理**：模型 Provider / Profile、授权、路由策略、配额与调用指标统一由 `RoutedLlmClient` 管理；Spring AI ChatClient 可作为可选传输层，但不替代鉴权与治理逻辑。
+
+---
+
+## 🧰 技术栈
+
+| 层次 | 主要技术 | 用途 |
+| --- | --- | --- |
+| Java 服务 | **Java 21、Spring Boot 3.5.6** | 核心业务与管理服务、虚拟线程 |
+| 服务接入 | **Spring Cloud 2025.0.3、Spring Cloud Alibaba 2025.0.0.0、Gateway、Nacos** | WebFlux 网关、服务发现、负载均衡 |
+| 服务通信 | **Apache Dubbo 3.3.6** | Admin ↔ Service 内部管理 RPC |
+| Agent / LLM | **Spring AI 1.1.8、Spring AI Alibaba Graph 1.1.2.0** | 模型调用适配、StateGraph、RedisSaver |
+| 数据访问 | **Spring JDBC、MyBatis-Plus 3.5.16、HikariCP、JSQLParser 5.3** | 业务只读查询、管理实体与 SQL 校验 |
+| 主数据 | **MySQL 8.4** | 用户、连接、查询历史、Agent/工作流、配置和审计 |
+| 缓存与协调 | **Redis 7.4、Redisson 4.6.1、Caffeine** | 会话、分布式锁、审批短期状态、checkpoint、Schema 缓存 |
+| 向量检索 | **PostgreSQL 17 + pgvector** | 知识、问答与长期记忆的向量投影 |
+| 认证安全 | **Sa-Token 1.44.0、Spring Security、AES-GCM** | 登录会话、请求安全、连接凭据保护 |
+| 受控执行 | **Docker / Python 3.12** | 数据分析容器隔离及资源限制 |
+| 测试与交付 | **JUnit 5、Mockito、Maven、Docker Compose** | 测试、构建和本地环境编排 |
+| 配套前端 | **React 18、TypeScript、Vite 6、Tailwind CSS 4、Nginx** | 交互界面、SSE 时间线、容器化静态资源 |
+
+## 📂 代码结构
+
+```text
+ZZJ-NL2SQL-backend/
+├── pom.xml                         # Maven Reactor / 依赖与版本管理
+├── zzj-service/                    # 核心业务服务
+│   └── src/main/
+│       ├── java/com/queryforge/
+│       │   ├── application/
+│       │   │   ├── agent/         # Manager / Planner / StepEngine / Graph / Worker
+│       │   │   ├── query/         # SQL 生成、执行、CSV、历史
+│       │   │   ├── datasource/    # 数据源管理
+│       │   │   ├── analysis/      # 分析业务
+│       │   │   ├── report/        # 报告
+│       │   │   ├── rag/           # 混合知识检索
+│       │   │   ├── memory/        # 长期记忆
+│       │   │   ├── mcp/           # MCP 生命周期与调用
+│       │   │   ├── workflow/      # 工作流执行
+│       │   │   ├── schedule/      # Cron 调度
+│       │   │   ├── model/         # 模型治理 / 路由
+│       │   │   └── ...            # Studio / Skill / Workspace / Identity
+│       │   ├── domain/            # 领域状态、契约、校验与模型
+│       │   ├── infrastructure/    # MySQL、Redis、pgvector、LLM、Sandbox 适配
+│       │   ├── trigger/           # REST Controller 与 RPC Provider
+│       │   └── QueryForgeApplication.java
+│       └── resources/
+│           ├── application.yml
+│           └── db/                # 版本化 SQL 初始化与增量脚本
+├── zzj-gateway/                   # WebFlux Gateway / Nacos / 认证过滤
+├── zzj-admin/                     # 管理 API / Dubbo Consumer
+├── zzj-common/                    # 共享 RPC 契约与 DTO
+├── zzj-sandbox/                   # 独立 Docker Python Sandbox JAR
+├── docker/
+│   ├── start.ps1                  # Windows 完整环境启动
+│   ├── stop.ps1                   # 停止并保留数据卷
+│   ├── .env.example
+│   └── mysql-init/                # Compose 首次数据库初始化
+├── tools/                         # 本地 LLM/MCP 测试桩与测试脚本
+├── scripts/start-local.sh         # 本地启动辅助脚本
+├── compose.yaml                   # MySQL / Redis / PostgreSQL / Nacos / 服务 / 前端
+├── Dockerfile                     # Java 服务多阶段镜像
+└── .env.example                   # 本机 Spring 属性示例
+```
+
+---
+
+## 🚀 快速开始
+
+### 环境要求
+
+- **推荐方式**：Docker Desktop（Docker Engine + Compose v2），Git、PowerShell（Windows）。完整环境还需要配套前端源码。
+- **本地独立启动**：JDK 21、Maven 3.9+、MySQL 8、Redis、PostgreSQL + pgvector、Nacos 3.2.x；模型分析需配置可用的 OpenAI 兼容 API。
+- **沙箱**：只有 Docker 守护进程与所需 Python 镜像可用时才能执行隔离 Python 分析。
+
+### 方式一：Docker Compose（Windows 推荐）
+
+**1. 拉取前后端到同级目录**（`compose.yaml` 使用 `../frontend` 构建前端）：
+
+```powershell
+mkdir ZZJ-NL2SQL
+cd ZZJ-NL2SQL
+git clone https://github.com/zmzzj1/ZZJ-NL2SQL-backend.git backend
+git clone https://github.com/zmzzj1/ZZJ-NL2SQL-front.git frontend
+cd backend
+```
+
+**2. 创建本地配置**：
+
+```powershell
+New-Item -ItemType Directory -Force config | Out-Null
+Copy-Item .env.example config/local.properties
+```
+
+编辑 `config/local.properties`，至少设置 `app.security.encryption-key` 为**随机 32 字节密钥的 Base64**，并按实际模型提供商填入 `app.llm.api-key`、`app.llm.base-url`、`app.llm.model`；若使用向量检索，还需配置可用的 Embedding 参数。
+
+**注意 Compose 的数据库地址**：`.env.example` 示例文件包含 `app.management.url=jdbc:mysql://127.0.0.1:3306/...`、固定用户名及占位密码。**使用 Docker Compose 时，请从 `config/local.properties` 中删除这三项 `app.management.url`、`app.management.username`、`app.management.password`**，让 `application.yml` 中的 `MANAGEMENT_DB_URL / MANAGEMENT_DB_USERNAME / MANAGEMENT_DB_PASSWORD` 读取 Compose 提供的 `mysql` 服务地址和随机密码；否则外部配置可能覆盖容器环境对应的默认占位值。独立本地 Java 启动才需要按自己的 MySQL 地址填写这三项。
+
+PowerShell 生成密钥示例：
+
+```powershell
+$bytes = New-Object byte[] 32
+[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+[Convert]::ToBase64String($bytes)
+```
+
+使用 Compose 网络中的演示 MySQL 数据源时，可在 `config/local.properties` 中将 `mysql` **显式添加到受信主机列表**，例如：
 
 ```properties
-MANAGEMENT_DB_URL=jdbc:mysql://127.0.0.1:3306/sql_platform?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowMultiQueries=false
-MANAGEMENT_DB_USERNAME=platform_app
-MANAGEMENT_DB_PASSWORD=<management-password>
-APP_ENCRYPTION_KEY=<base64-32-bytes>
+app.connection-policy.allowed-hosts=127.0.0.1,localhost,mysql
 ```
 
-生成加密密钥：`openssl rand -base64 32`。该密钥必须与数据库分开保管。
-
-环境变量：
-
-| 变量 | 说明 |
-| --- | --- |
-| `MANAGEMENT_DB_URL/USERNAME/PASSWORD` | 覆盖管理库 |
-| `APP_ENCRYPTION_KEY` | 连接密码加密密钥（32 字节 Base64） |
-| `CONNECTION_ALLOWED_HOSTS` | 允许连接的主机，默认 `127.0.0.1,localhost` |
-| `CONNECTION_ALLOWED_PORTS` | 允许连接的端口，默认 `3306,3307,3308,3309,3310` |
-| `LLM_BASE_URL/API_KEY/MODEL` | 模型配置；无 Key 时生成返回 503 |
-| `EMBEDDING_BASE_URL/API_KEY/MODEL/DIMENSIONS` | OpenAI 兼容 Embedding 配置；默认地址与密钥可继承 LLM 配置 |
-| `EMBEDDING_REQUEST_TIMEOUT` | Embedding 请求超时，默认 30 秒 |
-| `SQL_MAX_ROWS` / `SQL_QUERY_TIMEOUT_SECONDS` | 行数/超时限制 |
-| `AGENT_MAX_STEPS` / `AGENT_MAX_REPAIRS` | Agent 最大步骤数/单步最大修复次数 |
-| `AGENT_MAX_PLAN_CHARS` / `AGENT_MAX_LLM_CALLS` | 计划长度/单次运行 LLM 调用上限 |
-| `SCHEDULE_POLL_INTERVAL_MS` / `SCHEDULE_LEASE_SECONDS` | 调度轮询间隔/执行租约秒数 |
-| `SCHEDULE_MAX_CLAIM_BATCH` / `SCHEDULE_EXECUTION_THREADS` | 单轮最大领取数/执行并发数 |
-| `SCHEDULE_CATCH_UP_WINDOW_MINUTES` / `SCHEDULE_MIN_INTERVAL_MINUTES` | 补偿窗口/允许的最短计划周期 |
-| `ANALYSIS_MAX_INPUT_ROWS/BYTES/CODE_CHARS` | 分析输入行数/字节/代码字符上限 |
-| `ANALYSIS_TIMEOUT_SECONDS` / `ANALYSIS_MEMORY_BYTES` / `ANALYSIS_CPUS` | 沙箱超时/内存/CPU 限额 |
-| `ANALYSIS_SANDBOX_IMAGE` / `ANALYSIS_SANDBOX_COMMAND` | 沙箱镜像/入口命令 |
-| `MCP_ECHO_SCRIPT` | 本地 MCP 测试服务脚本路径（默认 `tools/mcp-echo-server.mjs`） |
-
-Spring 属性（通过 `--app.*=value` 或外部配置传入）：
-
-| 属性 | 说明 |
-| --- | --- |
-| `app.llm.use-spring-ai` | 是否用 Spring AI ChatClient 作为底层模型传输层；默认 `false`（用内置 HTTP 客户端）。无论取值，统一入口都是 `RoutedLlmClient`，路由/配额/审计/熔断/故障转移语义不变，Spring AI 只替换最底层的 I/O 实现 |
-
-## Docker 一键环境
-
-仓库根目录的 `compose.yaml` 会构建并启动完整本地栈：MySQL 8.4、Redis 7.4、PostgreSQL 17 +
-pgvector 0.8.7、Nacos 3.2.4、Service、Gateway、Admin 和前端 Nginx。数据库与 Nacos 数据保存在
-Docker named volumes 中，普通停止和再次启动不会丢失。
-
-首次使用前需保证 Docker Desktop 守护进程已运行。启动脚本会生成不入库的本机数据库密码，并校验模型密钥与
-加密密钥等本机私密配置是否齐全；容器内数据库、Redis、PostgreSQL 和 Nacos 地址由 Compose 环境变量覆盖。
-首次构建还需要 Docker Desktop 能访问 Docker Hub；若拉取基础镜像时报 `auth.docker.io` 超时，请先在 Docker
-Desktop 中配置可用的网络代理或镜像加速器，再重新执行启动脚本。
-
-Windows 推荐直接运行：
+**3. 启动完整环境**：
 
 ```powershell
-# 在 backend/ 下执行；首次运行自动生成随机本地数据库密码
-powershell -ExecutionPolicy Bypass -File docker/start.ps1
-
-# 停止容器但保留全部 named volumes
-powershell -ExecutionPolicy Bypass -File docker/stop.ps1
+powershell -ExecutionPolicy Bypass -File .\docker\start.ps1
 ```
 
-默认入口为 `http://127.0.0.1:5174/`，Nacos 控制台为 `http://127.0.0.1:8082/`。启动脚本会在启动前
-检查 5174、8080–8083、8848、9848–9849、3306、6379 和 5432；若本机版服务仍占用端口，会停止并提示，
-不会擅自终止现有进程。MySQL 初始化复用 `zzj-service/src/main/resources/db/` 中的版本化 SQL；代码分析容器通过
-Docker socket 启动隔离沙箱，因此该 Compose 仅面向可信的本地开发环境。
+脚本会在缺少 `docker/.env` 时生成本地随机数据库密码，检测容器环境与端口冲突，然后执行 `docker compose up -d --build --wait`。MySQL 迁移、演示数据库、PostgreSQL 向量表通过初始化脚本在**首次创建数据卷**时执行。
 
-## 启动与测试
+**4. 访问服务**：
 
-P13 起本目录是 Maven 聚合父工程（`packaging=pom`），包含五个子模块：
+| 地址 | 服务 |
+| --- | --- |
+| `http://127.0.0.1:5174/` | 前端页面（Nginx） |
+| `http://127.0.0.1:8080/api/health` | 经 Gateway 的业务健康检查 |
+| `http://127.0.0.1:8080/actuator/health` | Gateway 健康检查 |
+| `http://127.0.0.1:8082/` | Nacos 控制台（本地开发环境） |
+| `http://127.0.0.1:8083/actuator/health` | Admin 健康检查 |
 
-| 模块 | 端口 | 说明 |
-| --- | --- | --- |
-| `zzj-service` | 8081（仅回环） | 全部既有核心业务（SQL/Agent/Workflow/RAG/Memory/Studio/认证），注册到 Nacos |
-| `zzj-gateway` | 8080 | 公开接入层：WebFlux Gateway + Nacos Discovery + LoadBalancer，转发 `/api/**` 到 `lb://zzj-service` |
-| `zzj-common` | 不监听端口 | Admin 与 Service 共享的最小 Dubbo 接口和可序列化 DTO |
-| `zzj-sandbox` | 不监听端口 | 可复用的 Docker Python 隔离执行能力；普通 JAR，不依赖 Spring、Nacos、Dubbo、数据库或认证 |
-| `zzj-admin` | 8083 | 独立管理查询服务；校验共享登录会话并经 Dubbo 调用 `zzj-service` |
-
-前端 `/api` 仍然指向 8080（Vite 代理不变），因此页面代码无需改动；8080 现在是网关而不是业务进程。
-
-### 入口认证（P13-M2）
-
-网关对 `/api/**` **默认要求登录**，只放行经核实的精确匿名端点；其余请求用核心服务已建立的
-Sa-Token/Redis 会话判定：
-
-- 匿名白名单（精确 Method + Path）：`GET /api/health`、`POST /api/v1/auth/register`、
-  `POST /api/v1/auth/login`、`GET /api/v1/auth/csrf`。`logout` 与 `me` 不在其中。
-- 未登录 → `401 {"code":"UNAUTHENTICATED",...}`；会话存储不可用 → `503 {"code":"SERVICE_UNAVAILABLE",...}`
-  （失败关闭，不静默放行）。响应体形状与核心服务一致，前端无需改动。
-- 网关只判断"能否继续"，**不签发身份、不构造可信身份头、不做资源授权**；连接/Workspace/管理员/
-  SQL 审批/工具权限仍由 `zzj-service` 独立判断。
-- 客户端自填的 `X-User-Id`、`X-Role`、`X-Workspace*`、`X-Internal*` 等头在网关边界即被移除。
-- 网关会话校验只读 Redis（不写、不续期），且连接惰性：Redis 晚于网关启动不会让网关起不来。
+**5. 停止**（默认保留 MySQL / PostgreSQL / Redis / Nacos named volumes）：
 
 ```powershell
-# 确保 JAVA_HOME 指向本机安装的 JDK 21
-mvn verify            # 在 backend/ 下构建整个 Reactor
-
-# 逐个启动（统一以 backend/ 为工作目录；先确认对应端口没有健康实例）
-# 1) Nacos（standalone）
-bash scripts/start-local.sh nacos
-# 2) zzj-service
-$env:PG_PASSWORD='<postgres-password>'
-bash scripts/start-local.sh service
-# 3) zzj-gateway
-bash scripts/start-local.sh gateway
-# 4) zzj-admin（需要 Redis、Nacos 与运行中的 zzj-service）
-mvn -pl zzj-admin spring-boot:run -Dspring-boot.run.arguments=--server.port=8083
+powershell -ExecutionPolicy Bypass -File .\docker\stop.ps1
 ```
 
-也可使用 `scripts/start-local.sh {nacos|service|gateway}`。
-
-健康检查：
-
-- 经网关：`GET http://127.0.0.1:8080/api/health`（转发到 Service）
-- 直连排障：`GET http://127.0.0.1:8081/api/health`（仅回环可达，不作为公开入口）
-- 网关自身：`GET http://127.0.0.1:8080/actuator/health`
-- Admin 自身：`GET http://127.0.0.1:8083/actuator/health`
-
-## 接口
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| POST | `/api/v1/auth/register` | 注册（BCrypt） |
-| POST | `/api/v1/auth/login` | 登录，建立 Session |
-| GET | `/api/v1/auth/me` | 当前用户 |
-| POST | `/api/v1/auth/logout` | 注销 |
-| GET | `/api/v1/auth/csrf` | CSRF Token |
-| GET/POST | `/api/v1/connections` | 本人连接列表/新增 |
-| PATCH/DELETE | `/api/v1/connections/{id}` | 修改/删除 |
-| POST | `/api/v1/connections/{id}/test` | 真实连通性测试 |
-| GET | `/api/v1/connections/{id}/schema` | JDBC 元数据 |
-| GET/POST | `/api/v1/conversations` | 会话列表/新建 |
-| GET/DELETE | `/api/v1/conversations/{id}` | 会话详情/删除 |
-| GET/DELETE | `/api/v1/query-history[/{id}]` | 查询历史列表、详情与删除 |
-| GET | `/api/v1/query-history/{id}/export` | 重新鉴权、Guard 校验并执行后导出 CSV |
-| POST | `/api/v1/sql/generate/stream` | SSE，`connectionId` 决定 Schema |
-| POST | `/api/v1/sql/execute` | 只读执行，`connectionId + sql` |
-| POST | `/api/v1/agent/runs/stream` | 创建并流式运行 Agent |
-| POST | `/api/v1/agent/runs/{runId}/steps/{stepId}/approve/stream` | 确认步骤并继续运行 |
-| POST | `/api/v1/agent/runs/{runId}/steps/{stepId}/reject` | 拒绝步骤 |
-| POST | `/api/v1/agent/runs/{runId}/cancel` | 取消运行 |
-| POST | `/api/v1/agent/runs/{runId}/plan/continue/stream` | 批准计划继续执行，或携带意见拒绝并重新规划 |
-| GET | `/api/v1/agent/runs`、`/{runId}`、`/latest` | 查询与恢复运行 |
-| POST/GET/PUT/DELETE | `/api/v1/knowledge/**` | 业务知识维护与关键词检索 |
-| GET/POST | `/api/v1/tools`、`/api/v1/tools/invoke` | 只读工具目录与调用 |
-| POST/GET | `/api/v1/analysis/runs/**` | Python 隔离分析（SSE）与详情 |
-| POST/GET/DELETE | `/api/v1/reports`、`/api/v1/reports/{id}`、`/{id}/preview` | 报告生成、读取与净化预览 |
-| GET/POST | `/api/v1/mcp/servers`、`.../{name}/test`、`.../{tool}/call` | MCP 预配置服务发现与只读调用 |
-| GET/POST/PUT/DELETE | `/api/v1/mcp-servers/**` | 用户级 MCP 服务配置、连接/断开、状态与工具发现 |
-| POST/GET/PUT/DELETE | `/api/v1/workflows`、`/api/v1/workflows/{id}` | 工作流 DAG 定义与版本化 |
-| POST/GET | `/api/v1/workflows/{id}/runs/stream`、`.../approve/stream` | 工作流运行与审批续跑 |
-| GET/POST/PATCH/DELETE | `/api/v1/schedules/**` | 定时计划、Cron 预览、启停、手动触发与运行历史 |
-| GET/POST/PATCH/DELETE | `/api/v1/studio/agents/**` | Agent Studio：草稿、发布、版本、回滚、测试运行 |
-| GET/POST/PATCH/DELETE | `/api/v1/skills/**` | Skill Registry：CRUD、发布、版本 |
-| GET/POST/PATCH/DELETE | `/api/v1/workspaces/**` | 工作空间、成员角色与资源授权 |
-| GET/POST/PATCH/DELETE | `/api/v1/memories/**` | 类型化长期记忆维护与检索 |
-| POST | `/api/v1/knowledge/search` | 按权限执行 KEYWORD、VECTOR 或 HYBRID 检索 |
-| GET/POST/PATCH | `/api/v1/model/**` | 模型供应商、能力档案、授权与路由策略 |
-| GET/POST | `/api/v1/admin/**` | 管理概览、模型用量、配额和审计 |
-| GET | `/api/v1/admin/users` | 独立 Admin 服务提供的用户分页查询，仅平台管理员 |
-| GET | `/api/v1/admin/dashboard` | 独立 Admin 服务提供的真实平台统计概览，仅平台管理员 |
-| GET | `/api/v1/admin/check` | 独立 Admin 服务的平台管理员权限自检 |
-| PUT | `/api/v1/admin/users/{userId}/status` | 启用或停用用户；停用后立即注销该用户会话 |
-| PUT | `/api/v1/admin/users/{userId}/quota` | 修改用户级 Token 配额 |
-
-## 安全边界
-
-- Spring Security Session + HttpOnly Cookie + CSRF（`X-XSRF-TOKEN`）。
-- 连接密码 AES-256-GCM 加密，接口不返回密码/密文；密钥独立配置。
-- 主机/端口白名单，数据库名/用户名只允许安全标识符；不接受任意 JDBC URL。
-- 所有连接查询带 `user_id`；跨用户资源统一 404。
-- SQL 执行：JSqlParser + 危险函数/系统库/跨库拒绝 + 只读账号 + `SET SESSION TRANSACTION READ ONLY` + 行数/超时。
-- 模型输出不会自动执行，必须用户显式提交。
-- Python 分析代码仅在隔离 Docker 容器执行（非 root、禁网、只读、去 capabilities、限额）；沙箱不可用时拒绝执行，不回退宿主机。
-- 分析输入仅来自服务端重新校验权限 + SQL Guard 后重新执行的真实受限结果，不接受前端伪造数组。
-- HTML 报告经白名单净化 + CSP + 沙箱 iframe 预览，禁止脚本执行。
-- MCP 的 STDIO 命令只来自服务端预配置白名单，拒绝用户提交 shell 命令；远程 SSE 地址经出站 URL 防护阻断回环、内网、元数据与未受信目标；敏感环境变量禁止持久化，工具输出始终视为不可信数据。
-- Agent 工具白名单在服务端真实过滤（运行关联 Agent 时非白名单工具拒绝），自定义提示词仅追加在平台安全指令之后。
-- Skill 是低信任提示词模板：只允许白名单变量、不执行脚本、不扩权、不绕过 SQL 审批。
-- 工作空间授权与资源自身权限分离；共享资源不会绕过连接归属、SQL Guard 或执行审批。
-- RAG 候选在数据库查询阶段按用户/空间过滤；Embedding 不可用时向量与混合模式明确失败，不伪装成向量召回。
-- 长期记忆按个人/空间隔离，携带来源与置信度；用户可编辑、禁用或删除。
-- 平台管理员身份只由数据库用户角色决定；Workspace OWNER 不自动获得平台管理权限。
-- 用户状态与配额修改由 Admin 和核心 Service 双层判权；管理员不能停用自己，被停用用户的既有会话立即失效且不能重新登录。
-- 模型供应商 Key 加密保存且永不回传；供应商 URL 拒绝回环、私网、保留网段及非 HTTP(S) 协议。
-- 路由先执行能力与授权过滤，再应用策略；流式响应中断后不拼接其他模型，SQL Guard 与审批边界保持不变。
-- 定时触发前重新校验工作流、连接、工作空间和 Agent 版本权限；调度器不自动批准或直接执行待确认 SQL。
-- CSV 导出不信任历史结果，按当前用户权限重新执行只读查询，并限制行数、单元格和文件大小以及转义公式前缀。
-- 统一状态图终态（COMPLETED/FAILED/CANCELED）不接受迟到回调覆写；审批以 `sqlVersion` + 原子领取保证重复批准/重放/双标签页不重复执行 SQL。
-- Spring AI 只作底层传输层，不替换或绕过统一模型入口；P9 的路由、授权、配额、审计、熔断与故障转移在任意传输层下都保留。
-
-## P12 基础设施集成（S1–S5）
-
-- **MyBatis-Plus（S1）**：`users` 管理实体走 `BaseMapper` + Wrapper（`@TableId(type=AUTO)` 回填自增主键）；业务 SQL 仍只走 SQL Guard + 只读执行 + 审批，不进入元数据 CRUD。
-- **Sa-Token + Redis（S2）**：Sa-Token 是唯一身份来源（`SaTokenIdentityService` + 每请求 `SaTokenAuthFilter`，`STATELESS`），HttpOnly `satoken` Cookie + 保留 Cookie CSRF；Redis 故障 fail-closed（按未登录，不发放身份）。已删除 Spring Session 身份承载，不存在双身份体系。
-- **pgvector（S3）**：独立 PostgreSQL 数据源（`PgVectorConfig`/`PgVectorStore`）存 GLOSSARY / QUESTION_KNOWLEDGE / MEMORY 三类向量投影；余弦相似度 Top-K，服务端 `userId + connectionId + vectorType`（工作空间记忆按 `workspace_id`）过滤；MySQL 授权候选集做最终复核；删除/停用同步软失效；PG/Embedding 故障 fail-soft 不阻塞主链路。
-- **Redis/Redisson 四场景（S4）**：Agent 计划短期上下文（`AgentPlanStore`，TTL + RLock）、HITL 待审批会话（`ApprovalSessionStore`，原子领取）、模型会话亲和（`ModelSessionAffinity`，短 TTL 键）、定时任务互斥（`ScheduleRunLock`，按任务 ID RLock，未获取即跳过）。
-- **Caffeine + 连接池（S5）**：连接 Schema 有界缓存（`ConnectionSchemaCache`，TTL 5min/500 条/变更显式失效）；目标库 Hikari 池按连接复用（`TargetConnectionFactory`，空闲过期即关池、`SET SESSION TRANSACTION READ ONLY`、淘汰不泄漏）。
-- MySQL 侧零新增表；PG 侧唯一增量 DDL：`zzj-service/src/main/resources/db/13-p12-pgvector.sql`（手工执行，不引入 Flyway）。
-
-## 本地模型测试桩
+macOS / Linux 可在创建 `docker/.env`（参考 `docker/.env.example`，填入强密码）及 `config/local.properties` 后，直接从 `backend/` 执行：
 
 ```bash
-node tools/llm-stub.mjs 9099
-# 另开终端
-$env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn spring-boot:run
+docker compose --env-file docker/.env up -d --build --wait
+docker compose --env-file docker/.env ps
+docker compose --env-file docker/.env down
 ```
 
-测试桩按服务端注入的 Schema 返回 `shop_orders` 或 `blog_posts` 查询；不是真实模型。
+> **开发环境提示**：Compose 中 `zzj-service` 挂载 Docker socket 以启动隔离分析容器，这对宿主 Docker 拥有高权限；Nacos 示例关闭了认证，服务也映射了部分内部端口。该编排适用于**可信本地开发**，不要不加加固直接用于公网生产部署。基础镜像首次拉取可能受 Docker Hub 网络连通性影响。
 
-## 测试
+### 方式二：本地 Maven 启动
 
-- P14-ARCH-01 全量验证：`mvn -o test` 共 615 个已跟踪自动化用例（`zzj-common` 6 个、`zzj-sandbox` 8 个、`zzj-service` 549 个、`zzj-gateway` 38 个、`zzj-admin` 14 个；0 failures/0 errors/21 skipped，2026-10-24 实跑）。新增覆盖 StateGraph 主执行链、消息总线与专业 Worker、checkpoint 恢复、HITL 并发、计划工具步骤和旧接口兼容性。
-- P14-B/P14-C 全量验证：`mvn verify` 共 561 个自动化用例（`zzj-common` 6 个、`zzj-sandbox` 8 个、`zzj-service` 495 个、`zzj-gateway` 38 个、`zzj-admin` 14 个；0 failures/0 errors/22 skipped，2026-10-23 实跑）。新增覆盖多候选 Guard/评分/回退、原子调用预算、角色依赖与分派、批准 SQL 结果交接、分析与报告产物持久化、SSE 事件及真实沙箱条件检查。
-- P14-A 全量验证：`mvn verify` 共 481 个自动化用例（`zzj-common` 6 个、`zzj-sandbox` 8 个、`zzj-service` 415 个、`zzj-gateway` 38 个、`zzj-admin` 14 个；0 failures/0 errors/17 skipped，2026-10-23 实跑）。新增覆盖 Manager 安全降级、闲聊/澄清状态、显式工具调用、双层授权、参数边界、递归输出脱敏和分层上下文真实注入。
-- P13-M4 全量验证：`mvn verify` 共 432 个自动化用例（`zzj-common` 6 个、`zzj-sandbox` 8 个、`zzj-service` 366 个、`zzj-gateway` 38 个、`zzj-admin` 14 个；0 failures/0 errors/17 skipped，2026-10-22 实跑）。其中 5 个真实 Docker 安全/资源探针因当前 Docker 守护进程不可访问而如实跳过，其余跳过项为缺少对应外部测试条件的集成测试。
-- P13-M2 全量基线：`mvn verify` 共 384 个自动化用例（`zzj-service` 350 个、`zzj-gateway` 34 个；0 failures/0 errors/12 skipped，2026-10-22 实跑）；跳过项均为缺少对应外部测试环境时主动跳过的集成测试。
-- P13-M3A 定向验证：Admin 契约、Provider、Gateway 路由、共享会话、Dubbo Consumer 和 Controller 共 32 个用例通过；可用 `mvn -pl zzj-admin -am -Dtest=AdminContractTest,AdminSessionServiceTest,AdminQueryRpcClientTest,AdminQueryControllerTest -Dsurefire.failIfNoSpecifiedTests=false test` 快速复测 Admin 侧。
-- P13-M3B 定向验证：上述 32 个管理模块用例通过；真实 Gateway → Admin → Dubbo → Service → MySQL 联调覆盖管理权限、账号状态、会话失效、用户配额和路由隔离，23/23 通过。
-- 真实环境用例（MySQL/PostgreSQL/Redis）在缺少对应服务时自动跳过并在报告输出原因，不冒充通过。
+先在本机准备好 **MySQL、Redis、PostgreSQL + pgvector、Nacos**。在后端仓库根目录创建 `config/local.properties` 并填写管理库连接、加密密钥、模型与向量服务配置；本地启动时不依赖前端 Docker 构建。
+
+**初始化数据库**（首次搭建；在 `backend/` 执行）：
+
+```bash
+# 先创建管理数据库和演示数据源
+mysql -h 127.0.0.1 -u root -p < zzj-service/src/main/resources/db/02-management-schema.sql
+mysql -h 127.0.0.1 -u root -p < zzj-service/src/main/resources/db/03-test-databases.sql
+
+# 后续增量脚本应按固定顺序执行至最新版本
+# 完整、权威的文件顺序见 docker/mysql-init/10-init-queryforge.sh
+# 同时为平台应用账号授权 sql_platform，为演示只读账号仅授予 SELECT
+
+# 在 PostgreSQL 中创建 rageng 库，安装 vector 扩展并建向量表
+psql -U postgres -d rageng -f zzj-service/src/main/resources/db/13-p12-pgvector.sql
+```
+
+管理员应单独创建 `platform_app` 等数据库用户并授予最小必要权限；数据库账号、密码和加密密钥**不要提交到仓库**。对于已经使用过的数据库，不应重放首次初始化脚本覆盖现有数据，需按迁移历史核对后执行必要增量。
+
+**构建与运行**（以下 `java -jar` 命令在不同终端分别执行）：
+
+```bash
+# 先启动 Nacos、MySQL、Redis、PostgreSQL，并保证配置与地址对应
+./mvnw verify
+
+# 终端 1：核心业务 Service
+java -jar zzj-service/target/zzj-service.jar
+
+# 终端 2：管理服务（依赖 Service 的 Dubbo Provider）
+java -jar zzj-admin/target/zzj-admin.jar
+
+# 终端 3：Gateway
+java -jar zzj-gateway/target/zzj-gateway.jar
+```
+
+**重要**：工作目录统一保持在 `backend/`，因为 `config/local.properties` 与 `tools/mcp-echo-server.mjs` 使用相对路径。服务默认 Nacos 地址为 `127.0.0.1:8848`，Service 默认监听 `127.0.0.1:8081`，Admin 默认监听 `127.0.0.1:8083`；浏览器与前端开发服务统一通过 Gateway `http://127.0.0.1:8080` 调用 API。当前仓库未配置 Flyway 自动迁移。
+
+### 本地模型测试桩
+
+仓库还提供 `tools/llm-stub.mjs` 与 `tools/mcp-echo-server.mjs` 供部分确定性测试及本地调试。它们不等于真实大模型或真实外部 MCP 服务；应按测试需求配置对应地址，不能把桩的输出当作实际 LLM 效果。
+
+---
+
+## ⚙️ 核心配置
+
+核心属性位于 [`zzj-service/src/main/resources/application.yml`](zzj-service/src/main/resources/application.yml)，本地密钥建议放入 `.gitignore` 忽略的 `config/local.properties`。环境变量可以覆盖应用默认值。
+
+| 配置 / 环境变量 | 说明 |
+| --- | --- |
+| `MANAGEMENT_DB_URL` / `MANAGEMENT_DB_USERNAME` / `MANAGEMENT_DB_PASSWORD` | MySQL 管理库连接，存储用户与平台元数据 |
+| `APP_ENCRYPTION_KEY` | 32 字节 Base64 密钥；用于数据源凭据加密 |
+| `REDIS_HOST` / `REDIS_PORT` | Redis 会话、状态与协调存储 |
+| `PG_URL` / `PG_USERNAME` / `PG_PASSWORD` | PostgreSQL + pgvector 数据源 |
+| `NACOS_SERVER_ADDR` | Nacos Discovery / Dubbo 注册中心 |
+| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | OpenAI 兼容大模型服务 |
+| `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` | Embedding 服务，供向量/混合检索 |
+| `CONNECTION_ALLOWED_HOSTS` / `CONNECTION_ALLOWED_PORTS` | 用户数据源可连接的主机/端口白名单 |
+| `SQL_MAX_ROWS` / `SQL_QUERY_TIMEOUT_SECONDS` | SQL 查询结果行数与超时上限 |
+| `AGENT_MAX_STEPS` / `AGENT_MAX_LLM_CALLS` | 单次 Agent 计划步骤数与模型调用预算 |
+| `AGENT_MAX_REPAIRS` | SQL 修复次数限制 |
+| `ANALYSIS_SANDBOX_IMAGE` / `ANALYSIS_TIMEOUT_SECONDS` | Docker Python 镜像与执行超时 |
+| `SCHEDULE_POLL_INTERVAL_MS` / `SCHEDULE_LEASE_SECONDS` | 定时任务轮询周期与租约 |
+| `app.agent.dispatch-mode` | Worker 分派：`OFF` / `BYPASS` / `SWITCH`，默认 `OFF` |
+| `app.agent.max-worker-attempts` | Worker 受控执行尝试次数，代码默认最多 2 次 |
+| `app.llm.use-spring-ai` | 是否以 Spring AI ChatClient 承载底层模型请求；统一模型治理入口保持不变 |
+
+模型 API Key 留空时，SQL 生成和依赖模型的 Agent 能力无法正常工作；普通健康检查不代表模型可用。Embedding / pgvector 不可用时，也不应将关键词检索结果描述成向量检索结果。
+
+---
+
+## 🔌 核心 API
+
+统一经 `http://127.0.0.1:8080` 的 Gateway 访问。除下表注明的匿名端点，其余业务接口依赖登录态、CSRF 及资源授权；流式请求以 `text/event-stream` 返回。
+
+| 领域 | 方法 | 路径 | 作用 |
+| --- | --- | --- | --- |
+| 认证 | `POST` | `/api/v1/auth/register` | 注册（匿名） |
+| 认证 | `POST` | `/api/v1/auth/login` | 登录并创建会话（匿名） |
+| 认证 | `GET` | `/api/v1/auth/me` | 当前用户 |
+| 认证 | `GET` | `/api/v1/auth/csrf` | CSRF Token（匿名） |
+| 数据源 | `GET / POST` | `/api/v1/connections` | 连接列表 / 新建 |
+| 数据源 | `POST` | `/api/v1/connections/{id}/test` | 数据库连通性测试 |
+| 数据源 | `GET` | `/api/v1/connections/{id}/schema` | 读取授权 Schema |
+| SQL | `POST` | `/api/v1/sql/generate/stream` | 流式生成 SQL |
+| SQL | `POST` | `/api/v1/sql/execute` | 执行只读 SQL |
+| 历史 | `GET` | `/api/v1/query-history/{id}/export` | 安全导出 CSV |
+| 对话 | `GET / POST` | `/api/v1/conversations` | 会话列表 / 创建 |
+| Agent | `POST` | `/api/v1/agent/runs/stream` | 创建并运行 Agent（SSE） |
+| Agent | `GET` | `/api/v1/agent/runs/{runId}` | 查询运行状态、步骤及工件 |
+| Agent | `GET` | `/api/v1/agent/runs/latest?conversationId=...` | 恢复最近一次运行视图 |
+| Agent | `POST` | `/api/v1/agent/runs/{runId}/steps/{stepId}/approve/stream` | SQL 版本审批与续跑 |
+| Agent | `POST` | `/api/v1/agent/runs/{runId}/steps/{stepId}/reject` | 拒绝 SQL 步骤 |
+| Agent | `POST` | `/api/v1/agent/runs/{runId}/plan/continue/stream` | 计划审批 / 反馈重规划 |
+| Agent | `POST` | `/api/v1/agent/runs/{runId}/cancel` | 取消运行 |
+| 分析 | `POST` | `/api/v1/analysis/runs/stream` | 隔离分析并输出 SSE |
+| 报告 | `GET` | `/api/v1/reports/{id}/preview` | 受控 HTML 预览 |
+| 知识 | `POST` | `/api/v1/knowledge/search` | 关键词 / 向量 / 混合检索 |
+| 工具 | `GET / POST` | `/api/v1/tools`、`/api/v1/tools/invoke` | 工具列表 / 受控调用 |
+| MCP | `GET / POST` | `/api/v1/mcp-servers` | 用户级 MCP Server 管理 |
+| Workflow | `POST` | `/api/v1/workflows/{id}/runs/stream` | 运行工作流（SSE） |
+| Workflow | `POST` | `/api/v1/workflows/runs/{runId}/nodes/{nodeId}/approve/stream` | 审批工作流节点并继续 |
+| 定时任务 | `GET / POST` | `/api/v1/schedules` | 定时计划查询 / 创建 |
+| Studio | `GET / POST` | `/api/v1/studio/agents` | Agent 配置管理 |
+| Skills | `GET / POST` | `/api/v1/skills` | Skill Registry |
+| 工作空间 | `GET / POST` | `/api/v1/workspaces` | 空间及角色授权 |
+| 记忆 | `GET / POST` | `/api/v1/memories` | 长期记忆管理 |
+| 管理 | `GET` | `/api/v1/admin/users`、`/api/v1/admin/dashboard` | 管理员用户分页 / 平台概览 |
+| 管理 | `PUT` | `/api/v1/admin/users/{userId}/status` | 用户启停 |
+| 管理 | `PUT` | `/api/v1/admin/users/{userId}/quota` | Token 配额调整 |
+
+### Agent 请求示例
+
+创建运行的主要字段来自 [`CreateAgentRunRequest`](zzj-service/src/main/java/com/queryforge/domain/agent/CreateAgentRunRequest.java)：
+
+```json
+{
+  "conversationId": 1,
+  "connectionId": 1,
+  "userInput": "统计最近30天各类商品的销售金额并分析趋势",
+  "autoConfirm": false
+}
+```
+
+通过 `POST /api/v1/agent/runs/stream` 提交，实际调用需要有效的登录 Cookie 与 CSRF Token。`autoConfirm=false` 允许复杂计划进入风险审核；它不改变 SQL 的逐版本审批要求。示例中的 ID 仅为占位值，必须替换为当前账户已授权的真实 ID。
+
+计划审核提交形如：
+
+```json
+{
+  "approved": false,
+  "hitlVersion": 2,
+  "feedback": "请把分析范围改为最近7天，并按地区拆分"
+}
+```
+
+SQL 审批只确认前端展示过的版本：
+
+```json
+{
+  "sqlVersion": 1,
+  "confirm": true,
+  "clientRequestId": "example-request-001"
+}
+```
+
+### SSE 事件
+
+Agent 时间线会产生如 `run.started`、`agent.routed`、`plan.ready`、`plan.review_required`、`step.sql_ready`、`approval.required`、`step.succeeded`、`analysis.succeeded`、`report.ready`、`run.completed`、`run.failed`、`node.*`、`worker.thinking`、`bus.dispatched` 等事件（以相应路径实际执行、当前版本实现和条件触发为准）。事件体由后端结构化 DTO 序列化，前端不应把“事件已送达”直接解释为“外部动作已成功”。
+
+---
+
+## 🧪 测试与验证
+
+```bash
+# 父工程：全部 Maven 模块单元测试与生命周期校验
+./mvnw verify
+
+# 单独验证 Sandbox 及其上游依赖
+./mvnw -pl zzj-sandbox -am test
+
+# 前端仓库（独立目录）
+npm run check
+```
+
+**已有验证记录**（来自仓库原 README，非本文件生成时重新运行的 CI）：
+
+| 基线 | 测试记录 | 重点 |
+| --- | --- | --- |
+| `003f16f` 附近的 2026-10-24 验证 | **615 个自动化用例，0 failures、0 errors、21 skipped** | StateGraph 运行、checkpoint 恢复、Worker Bus、HITL 并发、兼容接口 |
+| 前一阶段 2026-10-23 验证 | **561 个用例，0 failures、0 errors、22 skipped** | SQL 多候选、角色分派、审批 SQL 与 Python / 报告依赖链 |
+| Admin 定向联调记录 | **23 / 23** 场景通过 | Gateway → Admin → Dubbo → Service → MySQL、用户状态、会话与配额 |
+
+主要测试覆盖：SQL Guard 与只读执行、用户/空间权限、Manager 安全降级、SQL 版本审批、计划审核的并发/重复操作、StateGraph 节点推进、Worker Bus 三模式、MCP 参数与权限、沙箱安全参数、RAG/Memory、调度租约及接口兼容性。**环境依赖型测试在 MySQL / PostgreSQL / Redis / Docker 不可用时可能跳过**；单元测试通过不等于真实模型效果、安全隔离和完整部署已通过端到端验收。运行结论以自己的测试报告为准。
+
+## ⚠️ 当前限制与部署说明
+
+1. **只读分析优先**：业务 SQL 不提供通用的任意写入能力，所有分析请求必须受 SQL Guard、权限与审批限制。
+2. **模型与 Embedding 服务外部依赖**：不同兼容 API 的响应格式和工具能力可能不同，需使用真实服务验证；无可用密钥无法完整体验 Agent。
+3. **消息总线不持久化**：当前 In-JVM Bus 用于同进程 Worker 分派与迁移验证，不提供跨节点消息可靠投递承诺。
+4. **数据库脚本不是自动迁移框架**：MySQL 初始化脚本在新数据卷首次创建时运行；已有数据卷上的结构更新必须经过单独迁移管理。
+5. **Compose 面向可信开发环境**：Docker socket、Nacos 匿名访问及内部端口映射必须在生产部署前调整并进行安全审计；服务容器通过宿主 Docker daemon 创建沙箱时还需检查临时目录挂载路径一致性，不能只凭 Docker socket 可用就认定 Python 沙箱端到端通过。
+6. **运行评测与代码版本要对应**：测试数字是指定时间点的记录，不能视为后续任何提交自动通过。
+
+---
+
+## 🔗 相关仓库与源码入口
+
+- **后端**：[zmzzj1/ZZJ-NL2SQL-backend](https://github.com/zmzzj1/ZZJ-NL2SQL-backend)
+- **前端**：[zmzzj1/ZZJ-NL2SQL-front](https://github.com/zmzzj1/ZZJ-NL2SQL-front)
+- **Agent 图构建**：[`AgentGraphFactory`](zzj-service/src/main/java/com/queryforge/application/agent/runtime/AgentGraphFactory.java)
+- **Agent 执行与恢复**：[`AgentGraphRunner`](zzj-service/src/main/java/com/queryforge/application/agent/runtime/AgentGraphRunner.java)
+- **Agent API / SSE**：[`AgentRunController`](zzj-service/src/main/java/com/queryforge/trigger/agent/AgentRunController.java)、[`AgentStreamEvents`](zzj-service/src/main/java/com/queryforge/domain/agent/AgentStreamEvents.java)
+- **SQL 候选选择**：[`SqlCandidateSelectionService`](zzj-service/src/main/java/com/queryforge/application/agent/sql/SqlCandidateSelectionService.java)
+- **Python 沙箱**：[`DockerPythonSandboxExecutor`](zzj-sandbox/src/main/java/com/zzj/sandbox/DockerPythonSandboxExecutor.java)
+- **本地完整部署**：[`compose.yaml`](compose.yaml)
+
+> **许可说明**：截至以上代码基线，仓库根目录未发现 `LICENSE` 文件。请勿仅根据所使用的开源依赖推断本项目采用 MIT 或其他许可证；如计划公开授权或接受外部贡献，应单独添加明确的许可文件。
