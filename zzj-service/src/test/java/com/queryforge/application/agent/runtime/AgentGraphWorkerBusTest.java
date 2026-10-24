@@ -262,6 +262,42 @@ class AgentGraphWorkerBusTest {
     }
 
     @Test
+    @DisplayName("G19：200 组 TaskDispatch 各重复投递一次 → 每组只执行一次并重放同一结果")
+    void duplicateDispatchBurst_shouldExecuteExactlyOncePerCorrelationId() {
+        AgentMessageBus bus = new AgentMessageBus();
+        WorkerExecutor executor = new WorkerExecutor(new AgentProperties(3, 2, 6000, 12, 2,
+                AgentProperties.DISPATCH_SWITCH));
+        WorkerEndpoint endpoint = new WorkerEndpoint("endpoint-burst-dedupe", bus, executor);
+        bus.registerEndpoint(endpoint.endpointId());
+
+        List<BusMessage> acks = new ArrayList<>();
+        bus.subscribe("agent.bus.ack", acks::add);
+
+        RecordingAction action = new RecordingAction(0);
+        int distinctTasks = 200;
+        for (int index = 0; index < distinctTasks; index++) {
+            WorkerTask task = task("attempt-burst-" + index);
+            String correlationId = RUN_ID + "/" + STEP_ID + "/" + task.attemptId();
+            endpoint.registerPending(correlationId,
+                    new WorkerEndpoint.PendingExecution(action, null, task, context(null)));
+            BusMessage.TaskDispatch message = new BusMessage.TaskDispatch(
+                    "msg-burst-" + index, correlationId, RUN_ID, STEP_ID, task.attemptId(),
+                    "graph", "endpoint", "worker", Map.of("role", "DATA_SCIENTIST"));
+
+            BusMessage.WorkerResult first = endpoint.handle(message);
+            BusMessage.WorkerResult duplicate = endpoint.handle(message);
+
+            assertThat(duplicate.outcome()).isEqualTo(first.outcome());
+            assertThat(endpoint.cachedResult(correlationId)).isNotNull();
+        }
+
+        // 400 次投递（200 个 correlationId，每个重复一次）只产生 200 次真实业务调用和 200 个 ACK。
+        assertThat(action.attempts()).isEqualTo(distinctTasks);
+        assertThat(acks).hasSize(distinctTasks)
+                .allMatch(BusMessage.TaskAck.class::isInstance);
+    }
+
+    @Test
     @DisplayName("G19：SWITCH 端点未注册 → 明确失败且不本地兜底执行（防双执行）")
     void missingEndpoint_shouldFailWithoutLocalFallback() {
         AgentMessageBus bus = new AgentMessageBus();

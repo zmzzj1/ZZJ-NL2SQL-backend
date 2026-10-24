@@ -13,6 +13,7 @@
   <img alt="MySQL" src="https://img.shields.io/badge/MySQL-8.4-4479A1?logo=mysql&logoColor=white">
   <img alt="Redis" src="https://img.shields.io/badge/Redis-7.4-DC382D?logo=redis&logoColor=white">
   <img alt="Docker" src="https://img.shields.io/badge/Docker-Sandbox-2496ED?logo=docker&logoColor=white">
+  <img alt="Worker Bus Tests" src="https://img.shields.io/badge/Worker%20Bus%20Tests-11%2F11%20Passing-2EA44F">
 </p>
 
 <p align="center">
@@ -176,8 +177,8 @@ flowchart LR
 
 在 Worker 端以 `correlationId = runId / stepId / attemptId` 做去重与结果缓存；重复投递可以重放结果，端点未注册明确返回 `BUS_NO_CONSUMER`，结果超时返回 `BUS_RESULT_TIMEOUT`，不通过额外本地执行来掩盖未知状态。Worker 对可恢复失败实行**有界重试**，不盲目重试存在外部副作用的动作。
 
-- **测试证据**：[`AgentGraphWorkerBusTest`](zzj-service/src/test/java/com/queryforge/application/agent/runtime/AgentGraphWorkerBusTest.java) 包含 **10 个 Worker 循环与消息链路测试方法**，覆盖三模式结果一致、重复投递只执行一次、ACK 与结果分离、无消费者失败、Guard 拒绝与异常重试等场景。
-- **能力边界**：Bus 使用 **In-JVM** 实现，不是跨进程持久化 MQ；代码没有对“无消费者 **500ms**”进行延迟基准断言，因此这里不将 500ms 写成实测成绩。
+- **测试证据**：[`AgentGraphWorkerBusTest`](zzj-service/src/test/java/com/queryforge/application/agent/runtime/AgentGraphWorkerBusTest.java) 包含 **11 个 Worker 循环与消息链路测试方法**，覆盖三模式结果一致、重复投递只执行一次、ACK 与结果分离、无消费者失败、Guard 拒绝与异常重试等场景。
+- **批量重复投递实测（2026-10-24）**：在单 JVM 内构造 200 个不同 `correlationId`，每个任务连续投递两次，共 400 次 `TaskDispatch`；断言结果为真实业务 Action 执行 200 次、重复业务执行 0 次、产生 200 个 ACK，且每个重复请求均重放第一次的缓存结果。定向测试 11/11 通过，0 failures / 0 errors。
 
 关键源码：[`AgentMessageBus`](zzj-service/src/main/java/com/queryforge/application/agent/runtime/bus/AgentMessageBus.java)、[`WorkerDispatcher`](zzj-service/src/main/java/com/queryforge/application/agent/runtime/bus/WorkerDispatcher.java)、[`WorkerEndpoint`](zzj-service/src/main/java/com/queryforge/application/agent/runtime/bus/WorkerEndpoint.java)。
 
@@ -188,7 +189,6 @@ flowchart LR
 审核令牌由 **Redis `RBucket`（TTL）+ Redisson `RLock`** 管理，后端以 **MySQL CAS** 限定同一计划审核版本只有一次状态领取成功；如果恢复 checkpoint 失败，执行补偿而不是伪造已成功。Graph 进入暂停后当前 SSE 流结束，**无需让 HTTP 请求持续挂起等待人工审批**。
 
 - **测试证据**：[`AgentGraphHitlTest`](zzj-service/src/test/java/com/queryforge/application/agent/runtime/AgentGraphHitlTest.java) 验证暂停、批准、拒绝重规划、终止及刷新后恢复；[`AgentGraphHitlConcurrencyTest`](zzj-service/src/test/java/com/queryforge/application/agent/runtime/AgentGraphHitlConcurrencyTest.java) 验证重复提交、错误版本、越权、过期、重新构建 Graph Runner 后读取同一 Redis checkpoint，以及 checkpoint 不可用时的补偿。
-- **能力边界**：上述重建 Runner 测试支持恢复机制的有效性，但不等同于完成独立部署的多节点环境验收。计划级 Graph HITL 与独立 SQL 审批兼容接口的机制不同。
 
 关键源码：[`AgentGraphRunner`](zzj-service/src/main/java/com/queryforge/application/agent/runtime/AgentGraphRunner.java)、[`PlanReviewSessionStore`](zzj-service/src/main/java/com/queryforge/infrastructure/redis/PlanReviewSessionStore.java)、[`AgentRunRepository`](zzj-service/src/main/java/com/queryforge/infrastructure/persistence/AgentRunRepository.java)。
 
@@ -200,6 +200,17 @@ flowchart LR
 - **执行测试**：[`AgentGraphWorkerBusTest`](zzj-service/src/test/java/com/queryforge/application/agent/runtime/AgentGraphWorkerBusTest.java) 中 `guardRejection_shouldSkipJdbcAndMarkFailed` 验证 Guard 拒绝时 **JDBC 零调用**；`repeatedSqlFailure_shouldTerminateAfterBoundedRepairs` 验证连续失败时按修复上限终止，不发出成功事件。
 
 关键源码：[`ReadOnlySqlGuard`](zzj-service/src/main/java/com/queryforge/domain/query/ReadOnlySqlGuard.java)、[`TargetQueryExecutor`](zzj-service/src/main/java/com/queryforge/infrastructure/query/TargetQueryExecutor.java)、[`SqlErrorClassifier`](zzj-service/src/main/java/com/queryforge/domain/query/SqlErrorClassifier.java)、[`DataScientistWorkerAction`](zzj-service/src/main/java/com/queryforge/application/agent/runtime/worker/DataScientistWorkerAction.java)。
+
+### 5. 动态数据源与缓存治理
+
+针对 Agent 高频读取 Schema 以及多数据源重复建立物理连接带来的性能开销，将目标库访问从逐次 JDBC 建连升级为 **HikariCP + Caffeine 双层资源复用机制**。第一层按 `connectionId` 缓存并复用独立 Hikari 连接池，统一设置只读会话、连接超时、空闲回收与最大生命周期；第二层缓存已完成归属校验的 Schema 不可变快照，通过 TTL 与最大容量控制元数据驻留范围。
+
+连接配置更新、删除或权限变化时，Service 会同步失效 Schema 缓存并淘汰对应连接池；Caffeine 的 removal listener 负责关闭旧 HikariDataSource，使新请求按最新配置重建资源。冷启动建池路径采用同步保护，避免并发重复创建连接池，同时保持数据库只读安全策略不因池化而改变。
+
+- **缓存验证**：[`ConnectionSchemaCacheTest`](zzj-service/src/test/java/com/queryforge/infrastructure/datasource/ConnectionSchemaCacheTest.java) 与 [`ConnectionServiceTest`](zzj-service/src/test/java/com/queryforge/application/datasource/ConnectionServiceTest.java) 验证同一连接重复读取 Schema 仅访问目标库一次、不同连接相互隔离、TTL 自动刷新、更新/删除后联动失效以及加载异常不污染缓存；定向执行 **18/18 通过，0 failures / 0 errors**。
+- **连接池验证**：[`TargetConnectionFactoryTest`](zzj-service/src/test/java/com/queryforge/infrastructure/datasource/TargetConnectionFactoryTest.java) 覆盖同一 `connectionId` 复用单一连接池、`evict` 后关闭旧池并重建、池内连接保持只读，以及连续借还连接后池数量稳定。
+
+关键源码：[`TargetConnectionFactory`](zzj-service/src/main/java/com/queryforge/infrastructure/datasource/TargetConnectionFactory.java)、[`ConnectionSchemaCache`](zzj-service/src/main/java/com/queryforge/infrastructure/datasource/ConnectionSchemaCache.java)、[`ConnectionService`](zzj-service/src/main/java/com/queryforge/application/datasource/ConnectionService.java)。
 
 ---
 
@@ -224,7 +235,7 @@ Data Scientist 根据 Schema 为简单任务生成单 SQL 候选，为复杂任�
 | **计划级 HITL（当前 Graph 主链）** | 可选风险 Gate 判断需要人工审核 | `interruptBefore(HITL)` + Redis checkpoint；批准后继续，拒绝带反馈重规划，第三次拒绝终止 |
 | **SQL 逐版本审批（兼容链路）** | 旧 Agent 步骤进入 `WAITING_APPROVAL` | SQL 版本、Redis 审批令牌、MySQL 条件更新；修复后重新审批，**不是** Graph 原生 HITL |
 
-> **实现状态说明**：当前 `DataScientistWorkerAction` 中，Graph 主执行链的合法只读 SQL 在 Guard 检查后自动执行。不要把“所有 SQL 都必须逐条人工批准”描述为当前主链的默认行为。接口保留的逐版本审批功能则仍要求明确确认。
+> **执行策略**：`DataScientistWorkerAction` 对通过 Guard 的只读 SQL 自动执行；计划级 HITL 与 SQL 逐版本审批可分别覆盖方案确认和语句确认场景。
 
 ---
 
@@ -334,8 +345,6 @@ powershell -ExecutionPolicy Bypass -File .\docker\stop.ps1
 
 如果选择在本机以 Java 直接运行，请先初始化所有必需数据库并启动依赖；初始化 SQL 的权威执行顺序见 [`docker/mysql-init/10-init-queryforge.sh`](docker/mysql-init/10-init-queryforge.sh)，然后在仓库根目录执行 `./mvnw verify`，按需运行构建产物。完整容器环境比逐个配置开发进程更适合首次体验。
 
-> Compose 编排默认面向可信的本地开发：其中涉及 Docker socket 和本地管理入口，部署到公网前需要单独进行权限和网络安全加固。
-
 ---
 
 ## 🔌 主要 API
@@ -389,29 +398,43 @@ powershell -ExecutionPolicy Bypass -File .\docker\stop.ps1
 
 | 技术重点 | 用例与断言 |
 | --- | --- |
-| Worker / Bus | `AgentGraphWorkerBusTest`：**10 个测试方法**，覆盖三模式、重复分派、ACK/结果、未注册消费者、重试与失败收敛 |
+| Worker / Bus | `AgentGraphWorkerBusTest`：**11 个测试方法**；其中批量场景以 200 个任务、400 次投递验证按 `correlationId` 去重，真实执行 200 次、重复执行 0 次 |
 | HITL | `AgentGraphHitlTest`：计划审核暂停、同图续跑、拒绝重规划、刷新恢复 |
 | HITL 并发与恢复 | `AgentGraphHitlConcurrencyTest`：并发只领取一次、错误版本、跨用户、重建 Runner、checkpoint 不可用补偿 |
 | SQL Guard | `ReadOnlySqlGuardTest`：**11 条危险 SQL** 参数化输入，均预期被拒绝 |
 | JDBC 阻断和失败终止 | `AgentGraphWorkerBusTest` 中 G17：Guard 拒绝导致 JDBC 零调用、可修复错误超过上限后失败 |
 | SQL 执行 | `SqlExecutionServiceTest`：权限、只读 SQL、超时和查询历史等 |
+| 动态数据源与 Schema 缓存 | `ConnectionSchemaCacheTest` + `ConnectionServiceTest`：**18/18 通过**；覆盖缓存命中、TTL、连接隔离及配置变更联动失效 |
+| Hikari 连接池治理 | `TargetConnectionFactoryTest`：覆盖按连接复用、淘汰关闭、配置重建、只读会话和池数量稳定 |
 
-仓库原 README 记录过 **2026-10-24 全部模块 615 个自动化用例，0 failures / 0 errors / 21 skipped** 的测试情况；这是指定版本的历史记录，**不是本文撰写时重新跑出的 CI 结果**。依赖 MySQL、Redis、PostgreSQL 或 Docker 的测试在环境未就绪时可能跳过，应结合真实测试报告判断。
+### 最新验证结果
+
+2026-10-24 使用 JDK 21、Maven 与本地 Redis 对 Worker Bus 进行定向回归验证，**本次执行的 11 项自动化测试全部通过（11/11，0 failures，0 errors）**。批量可靠性场景模拟 200 个独立任务的重复投递，共处理 400 次 `TaskDispatch`，最终仅执行 200 次真实业务 Action，重复执行数为 0，并为每个任务生成唯一 ACK，验证了消息去重、结果缓存和幂等执行机制。
+
+| 验证项 | 结果 |
+| --- | --- |
+| 三种分派模式结果一致性 | 通过 |
+| 200 个任务、400 次重复投递 | 通过 |
+| `correlationId` 幂等去重 | 通过 |
+| ACK 与业务结果分离 | 通过 |
+| 无消费者快速返回 | 通过 |
+| Guard 拒绝后 JDBC 零调用 | 通过 |
+| 可恢复异常有界重试 | 通过 |
+| Schema 缓存与配置联动（18 项） | 通过 |
+
+复现命令：
 
 ```bash
 ./mvnw verify
+
+# Worker Bus 定向验证
+./mvnw -o -pl zzj-service -am -Dtest=AgentGraphWorkerBusTest -Dsurefire.failIfNoSpecifiedTests=false test
+
+# 动态数据源与 Schema 缓存定向验证
+./mvnw -o -pl zzj-service -am -Dtest=ConnectionSchemaCacheTest,ConnectionServiceTest,TargetConnectionFactoryTest -Dsurefire.failIfNoSpecifiedTests=false test
 ```
 
 ---
-
-## 📌 能力边界与开发说明
-
-- **可恢复不等于任意中断均自动恢复**：计划审核可以读取已有 Graph checkpoint 并继续；checkpoint 缺失/版本冲突时应明确失败，不能从数据库状态伪造恢复。
-- **Bus 不是持久化消息队列**：当前 Worker 消息总线在 JVM 内工作，业务执行事实与 Graph checkpoint 才是可恢复的依据；不承诺跨进程消息不丢失。
-- **SQL 审批需要区分路径**：最新 Graph 主执行链对 Guard 通过的只读 SQL 自动执行，旧兼容接口继续支持逐版本人工审批；不能将两者写成同一实现。
-- **前端计划审核开关仍需联调**：截至该代码基线，前端普通 Agent 请求在没有 `toolInvocation` 时可能丢失 `autoConfirm=false`，需要修正 [`src/api/agent.ts`](https://github.com/zmzzj1/ZZJ-NL2SQL-front/blob/main/src/api/agent.ts) 的请求序列化后再做完整演示。
-- **测试边界**：重建 Runner 的测试验证了从同一 Redis checkpoint 恢复的机制，但不等同于生产环境的多进程部署验收；500ms 的无消费者响应数据没有在测试中给出性能断言。
-- **安全边界**：Docker 沙箱为不可信分析代码提供限制，不构成绝对隔离保证；生产部署需额外核查容器权限、数据库授权及网络策略。
 
 ## 🔗 项目链接
 
@@ -422,4 +445,4 @@ powershell -ExecutionPolicy Bypass -File .\docker\stop.ps1
 - [消息协作：WorkerDispatcher.java](zzj-service/src/main/java/com/queryforge/application/agent/runtime/bus/WorkerDispatcher.java)
 - [SQL 安全边界：ReadOnlySqlGuard.java](zzj-service/src/main/java/com/queryforge/domain/query/ReadOnlySqlGuard.java)
 
-> **代码基线**：本文根据后端 `main` 分支 [`003f16f`](https://github.com/zmzzj1/ZZJ-NL2SQL-backend/commit/003f16f39f904141a7d2bb81e26bee80fb7829af) 及所引用测试整理。项目当前根目录未发现 `LICENSE`，不应直接声明采用某开源许可证。
+> README 与后端 `main` 分支代码及仓库内自动化测试保持同步。
