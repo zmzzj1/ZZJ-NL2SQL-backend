@@ -11,7 +11,11 @@ public final class AgentStreamEvents {
     private AgentStreamEvents() {
     }
 
-    public record RunStarted(Long runId, Long conversationId) {
+    /**
+     * 运行启动：真实 runId、conversationId 与 Graph threadId（同 threadId 恢复的定位键；
+     * 浏览器端不能直接凭 threadId 绕过服务端身份验证）。
+     */
+    public record RunStarted(Long runId, Long conversationId, String threadId) {
     }
 
     public record PlanStep(Long stepId, int sequence, String objective) {
@@ -183,5 +187,20 @@ public final class AgentStreamEvents {
      * 仅用于让前端提示“参数已被自动修正”，diagnostic 为触发的校验错误摘要。
      */
     public record ToolRepair(Long runId, Long stepId, String toolName, int attempt, String diagnostic) {
+    }
+
+    /**
+     * P14-ARCH-01：Worker Loop 阶段提示（Thinking/Review/Act/Verify 真实推进）。
+     * phase 取值：thinking/acting/verified/verify_failed；不含模型推理原文与 Prompt。
+     */
+    public record WorkerPhase(Long runId, Long stepId, String role, String phase, String attemptId, int attempt) {
+    }
+
+    /**
+     * P14-ARCH-01：In-JVM 消息总线派发提示（OFF/BYPASS/SWITCH 真实模式与关联 ID）。
+     * 仅表示任务分派/回执语义，不代表业务执行成功。
+     */
+    public record BusDispatched(Long runId, Long stepId, String role, String mode, String messageId,
+                                String correlationId, String kind) {
     }
 }

@@ -103,11 +103,21 @@ public class AgentRunRepository {
      * 仍复用 {@code agent_steps}（sql_text 为 null、sql_version 为 0），不伪造 SQL。
      */
     public Long insertStep(Long runId, int sequence, String objective, Integer dependsOn, String agentRole) {
+        return insertStep(runId, sequence, objective, dependsOn, agentRole, null, null);
+    }
+
+    /**
+     * P14-E：计划内工具步骤的受控身份随步骤一起持久化，
+     * 使暂停/审批/刷新恢复后仍以同一条真实工具身份执行，不依赖内存或模型回复。
+     */
+    public Long insertStep(Long runId, int sequence, String objective, Integer dependsOn, String agentRole,
+                           String toolName, String toolArgsJson) {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbcTemplate.update(connection -> {
             PreparedStatement statement = connection.prepareStatement("""
-                    INSERT INTO agent_steps (run_id, sequence, objective, depends_on, status, agent_role)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO agent_steps (run_id, sequence, objective, depends_on, status, agent_role,
+                                             tool_name, tool_args)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """, Statement.RETURN_GENERATED_KEYS);
             statement.setLong(1, runId);
             statement.setInt(2, sequence);
@@ -119,6 +129,8 @@ public class AgentRunRepository {
             }
             statement.setString(5, StepStatus.PENDING.name());
             statement.setString(6, agentRole == null || agentRole.isBlank() ? "SQL_AGENT" : agentRole);
+            statement.setString(7, toolName);
+            statement.setString(8, toolArgsJson);
             return statement;
         }, keyHolder);
         Number key = keyHolder.getKey();
@@ -126,6 +138,23 @@ public class AgentRunRepository {
             throw new IllegalStateException("Agent 步骤创建后未返回主键");
         }
         return key.longValue();
+    }
+
+    /** 步骤上的受控工具身份（仅工具步骤有值）。 */
+    public record StepTool(String toolName, String toolArgsJson) {
+    }
+
+    /** P14-E：按 runId + stepId 读取工具身份，用于恢复后仍执行原工具。 */
+    public Optional<StepTool> findStepTool(Long runId, Long stepId) {
+        List<StepTool> rows = jdbcTemplate.query("""
+                        SELECT tool_name, tool_args FROM agent_steps
+                        WHERE id = ? AND run_id = ? AND tool_name IS NOT NULL AND tool_name <> ''
+                        """,
+                (resultSet, rowNum) -> new StepTool(
+                        resultSet.getString("tool_name"), resultSet.getString("tool_args")),
+                stepId,
+                runId);
+        return rows.stream().findFirst();
     }
 
     /**
@@ -451,7 +480,7 @@ public class AgentRunRepository {
         return jdbcTemplate.update("""
                         UPDATE agent_runs
                         SET status = ?, error_code = ?, updated_at = ?
-                        WHERE id = ? AND user_id = ? AND status IN (?, ?, ?)
+                        WHERE id = ? AND user_id = ? AND status IN (?, ?, ?, ?, ?)
                         """,
                 RunStatus.CANCELED.name(),
                 "RUN_CANCELED",
@@ -460,6 +489,8 @@ public class AgentRunRepository {
                 userId,
                 RunStatus.PLANNING.name(),
                 RunStatus.WAITING_APPROVAL.name(),
+                RunStatus.WAITING_PLAN_REVIEW.name(),
+                RunStatus.CLARIFYING.name(),
                 RunStatus.RUNNING.name());
     }
 
@@ -533,6 +564,20 @@ public class AgentRunRepository {
                         """,
                 PlanReviewStatus.REPLAN_REQUIRED.name(), truncateFeedback(feedback),
                 truncateReason(reason), LocalDateTime.now(), runId, userId, version);
+    }
+
+    /**
+     * P14-ARCH-01：拒绝计数补偿回滚（领取成功但图 checkpoint 恢复失败时恢复可领取状态）。
+     * 只回滚计数，不改变其他字段；调用方随后用 markPlanReviewStatus 恢复 AWAITING。
+     */
+    public int compensatePlanRejection(Long runId) {
+        return jdbcTemplate.update("""
+                        UPDATE agent_runs
+                        SET plan_rejection_count = GREATEST(plan_rejection_count - 1, 0),
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                LocalDateTime.now(), runId);
     }
 
     /** 第 3 次拒绝后终结 Run：FAILED + REJECTED，清理等待标记。 */
@@ -689,5 +734,28 @@ public class AgentRunRepository {
                 (resultSet, rowNum) -> resultSet.getString(1),
                 runId);
         return rows.stream().findFirst();
+    }
+
+    // ---------------------------------------------------------------- P14-ARCH-01：Graph thread 归属映射
+
+    /**
+     * 绑定 Run → 真实 Graph threadId（启动时一次性绑定；已被绑定时返回 0，防重入）。
+     * 归属映射持久化在 MySQL，恢复时严格按 userId 校验，不接受客户端自报 threadId。
+     */
+    public int bindGraphThread(long runId, String threadId) {
+        return jdbcTemplate.update("""
+                        UPDATE agent_runs SET graph_thread_id = ?, updated_at = ?
+                        WHERE id = ? AND graph_thread_id IS NULL
+                        """,
+                threadId, LocalDateTime.now(), runId);
+    }
+
+    /** 查询 Run 归属的 Graph threadId（未绑定返回空）。 */
+    public Optional<String> findGraphThreadId(long runId) {
+        List<String> rows = jdbcTemplate.query(
+                "SELECT graph_thread_id FROM agent_runs WHERE id = ?",
+                (resultSet, rowNum) -> resultSet.getString(1),
+                runId);
+        return rows.stream().filter(value -> value != null && !value.isBlank()).findFirst();
     }
 }

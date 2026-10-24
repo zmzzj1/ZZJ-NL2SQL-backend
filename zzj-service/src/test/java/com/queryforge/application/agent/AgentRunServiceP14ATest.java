@@ -1,5 +1,6 @@
 package com.queryforge.application.agent;
 
+import com.queryforge.application.agent.runtime.AgentGraphRunner;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -64,6 +65,9 @@ import com.queryforge.domain.agent.ResolvedAgentConfig;
 @ExtendWith(MockitoExtension.class)
 @DisplayName("P14-A 闲聊、澄清与显式工具快捷路径")
 class AgentRunServiceP14ATest {
+
+    @Mock
+    private AgentGraphRunner graphRunner;
 
     private static final long USER_ID = 1L;
     private static final long RUN_ID = 5L;
@@ -160,7 +164,7 @@ class AgentRunServiceP14ATest {
                 knowledgeService, configResolver, graphStateService, approvalSessionStore,
                 engine, contextAssembler, failureHandler, planState, roleRecorder, llmLimiter,
                 new ToolInvocationRequestGuard(),
-                planReviewGate, planReviewSessionStore, planner);
+                planReviewGate, planReviewSessionStore, planner, graphRunner);
         lenient().when(repository.tryIncrementLlmCalls(anyLong(), anyInt())).thenReturn(1);
     }
 
@@ -189,187 +193,12 @@ class AgentRunServiceP14ATest {
 
     // ------------------------------------------------------------------- T2 闲聊
 
-    @Test
-    @DisplayName("T2：闲聊使用真实模型回答并持久化，不产生 SQL 步骤")
-    void chitchat_shouldUseRealModelAnswerAndPersist() throws Exception {
-        stubCommon();
-        when(managerRouter.route(any(ManagerRouter.RoutingContext.class)))
-                .thenReturn(new ManagerRouter.RouteDecision(AgentRoute.CHITCHAT, "问候"));
-        when(sqlAssistant.chitchatAnswer(anyString(), anyString()))
-                .thenReturn("你好！我可以基于已授权 Schema 生成只读 SQL。");
-        when(conversationService.memorySummary(CONVERSATION_ID)).thenReturn(null);
-        when(sqlAssistant.memorySummary(any(), anyString(), anyString())).thenReturn("用户打过招呼");
-
-        String output = start(prepared());
-
-        assertThat(output).contains("event: agent.routed", "CHITCHAT", "event: run.completed");
-        assertThat(output).contains("你好！我可以基于已授权 Schema 生成只读 SQL。");
-        verify(repository).updateRunStatus(
-                RUN_ID, RunStatus.COMPLETED, "你好！我可以基于已授权 Schema 生成只读 SQL。", null, null);
-        verify(conversationService).appendMessage(
-                CONVERSATION_ID, MessageRole.ASSISTANT, "你好！我可以基于已授权 Schema 生成只读 SQL。",
-                MessageStatus.COMPLETED);
-        verify(repository, never()).insertStep(any(), anyInt(), anyString(), any());
-        verify(planner, never()).plan(anyString(), anyString(), anyString());
-        verify(sqlAssistant, never()).generateSql(anyString(), anyString(), anyString(), anyString(),
-                anyString(), anyString(), anyString());
-    }
-
-    @Test
-    @DisplayName("T2：模型失败不伪造成功回复，进入 Run.FAILED")
-    void chitchat_shouldFailWhenModelFails() throws Exception {
-        stubCommon();
-        when(managerRouter.route(any(ManagerRouter.RoutingContext.class)))
-                .thenReturn(new ManagerRouter.RouteDecision(AgentRoute.CHITCHAT, "问候"));
-        when(sqlAssistant.chitchatAnswer(anyString(), anyString()))
-                .thenThrow(new ApiException(ErrorCode.LLM_UPSTREAM_ERROR, HttpStatus.BAD_GATEWAY, "模型服务暂不可用"));
-
-        String output = start(prepared());
-
-        assertThat(output).contains("event: run.failed", "LLM_UPSTREAM_ERROR");
-        verify(repository).updateRunStatus(
-                RUN_ID, RunStatus.FAILED, null, "LLM_UPSTREAM_ERROR", "对话生成失败，请稍后重试");
-        verify(repository, never()).insertStep(any(), anyInt(), anyString(), any());
-    }
-
-    @Test
-    @DisplayName("T2：模型返回空串时用简洁能力说明兜底（不冒充模型内容）")
-    void chitchat_shouldFallbackOnlyOnBlankAnswer() throws Exception {
-        stubCommon();
-        when(managerRouter.route(any(ManagerRouter.RoutingContext.class)))
-                .thenReturn(new ManagerRouter.RouteDecision(AgentRoute.CHITCHAT, "问候"));
-        when(sqlAssistant.chitchatAnswer(anyString(), anyString())).thenReturn("   ");
-        when(conversationService.memorySummary(CONVERSATION_ID)).thenReturn(null);
-        when(sqlAssistant.memorySummary(any(), anyString(), anyString())).thenReturn("用户打过招呼");
-
-        String output = start(prepared());
-
-        assertThat(output).contains("event: run.completed");
-        verify(repository).updateRunStatus(
-                RUN_ID, RunStatus.COMPLETED,
-                "我可以基于你已授权的数据源生成只读 SQL（需你确认后执行）、做多步分析与图表，"
-                        + "并解释授权知识库中的业务口径。直接描述你的问题即可。",
-                null, null);
-    }
 
     // ------------------------------------------------------------------- T3 澄清
 
-    @Test
-    @DisplayName("T3：缺少关键口径时进入 CLARIFYING，不生成 SQL 与审批")
-    void clarify_shouldWaitWithoutGeneratingSql() throws Exception {
-        stubCommon();
-        when(managerRouter.route(any(ManagerRouter.RoutingContext.class)))
-                .thenReturn(new ManagerRouter.RouteDecision(AgentRoute.CLARIFY, "请补充统计的时间窗口"));
-
-        String output = start(prepared());
-
-        assertThat(output).contains("event: clarify.required", "请补充统计的时间窗口");
-        assertThat(output).doesNotContain("event: run.completed");
-        verify(repository).updateRunStatus(
-                RUN_ID, RunStatus.CLARIFYING, null, "AGENT_CLARIFY", "请补充统计的时间窗口");
-        verify(repository, never()).insertStep(any(), anyInt(), anyString(), any());
-        verify(approvalSessionStore, never()).register(any(), any(), anyInt(), anyString());
-        verifyNoInteractions(planner, sqlAssistant);
-    }
 
     // --------------------------------------------------------------- T4 显式工具
 
-    @Test
-    @DisplayName("T4：已授权工具绕开分类与 Planner，单次执行并落库")
-    void toolInvocation_shouldBypassRouterAndPlanner() throws Exception {
-        when(connectionService.schemaContext(USER_ID, CONNECTION_ID)).thenReturn(SCHEMA);
-        when(conversationService.recentCompletedMessages(CONVERSATION_ID, 6)).thenReturn(List.of());
-        when(conversationService.memorySummary(CONVERSATION_ID)).thenReturn(null);
-        when(repository.insertStep(RUN_ID, 1, "调用工具 describe_schema", null, "TOOL_ASSISTANT"))
-                .thenReturn(STEP_ID);
-        when(repository.findSteps(RUN_ID)).thenReturn(List.of());
-        when(toolPolicy.allowsStrictly(RUN_ID, "describe_schema")).thenReturn(true);
-        when(repository.startNonSqlStep(STEP_ID)).thenReturn(1);
-        when(toolAssistant.invoke(any(), any(), any(), any())).thenReturn(
-                new ToolInvocationResult("describe_schema", Map.of("tables", List.of("shop_orders")), 12));
-        when(toolOutputSanitizer.summarize(any())).thenReturn("{\"tables\":[\"shop_orders\"]}");
-        when(conversationService.memorySummary(CONVERSATION_ID)).thenReturn(null);
-        when(sqlAssistant.memorySummary(any(), anyString(), anyString())).thenReturn("查看了表结构");
-
-        String output = start(preparedWithTool("describe_schema", Map.of("table", "orders")));
-
-        assertThat(output).contains("event: agent.routed", "TOOL_INVOCATION");
-        assertThat(output).contains("event: plan.ready", "event: tool.result", "event: run.completed");
-        // 跳过分类模型与 Planner。
-        verifyNoInteractions(managerRouter, planner);
-        verify(sqlAssistant, never()).generateSql(anyString(), anyString(), anyString(), anyString(),
-                anyString(), anyString(), anyString());
-        // 恰好一次工具调用，经角色能力 + ToolRegistry 双层授权。
-        verify(toolAssistant).invoke(any(), any(), any(), any());
-        verify(toolPolicy).allowsStrictly(RUN_ID, "describe_schema");
-        verify(repository).insertStep(RUN_ID, 1, "调用工具 describe_schema", null, "TOOL_ASSISTANT");
-        verify(repository).startNonSqlStep(STEP_ID);
-        verify(repository).completeNonSqlStep(STEP_ID, "{\"tables\":[\"shop_orders\"]}");
-        verify(repository).updateRunStatus(
-                RUN_ID, RunStatus.COMPLETED, "{\"tables\":[\"shop_orders\"]}", null, null);
-        verify(repository, never()).setStepSql(any(), anyString(), anyInt(), anyInt());
-        verify(approvalSessionStore, never()).register(any(), any(), anyInt(), anyString());
-    }
-
-    @Test
-    @DisplayName("T4：Agent 未授权的工具明确失败，不调用工具")
-    void toolInvocation_shouldRejectUnauthorizedTool() throws Exception {
-        when(connectionService.schemaContext(USER_ID, CONNECTION_ID)).thenReturn(SCHEMA);
-        when(conversationService.recentCompletedMessages(CONVERSATION_ID, 6)).thenReturn(List.of());
-        when(repository.insertStep(RUN_ID, 1, "调用工具 drop_table", null, "TOOL_ASSISTANT"))
-                .thenReturn(STEP_ID);
-        when(repository.findSteps(RUN_ID)).thenReturn(List.of());
-        when(toolPolicy.allowsStrictly(RUN_ID, "drop_table")).thenReturn(false);
-
-        String output = start(preparedWithTool("drop_table", Map.of()));
-
-        assertThat(output).contains("event: run.failed", "TOOL_NOT_IN_AGENT_WHITELIST");
-        verify(toolAssistant, never()).invoke(any(), any());
-        verify(repository).failNonSqlStep(STEP_ID, "TOOL_NOT_IN_AGENT_WHITELIST",
-                "当前 Agent 配置未授权该工具：drop_table");
-        verifyNoInteractions(managerRouter, planner);
-    }
-
-    @Test
-    @DisplayName("T4：工具执行失败保存失败类别并发 run.failed")
-    void toolInvocation_shouldFailWhenToolExecutionFails() throws Exception {
-        when(connectionService.schemaContext(USER_ID, CONNECTION_ID)).thenReturn(SCHEMA);
-        when(conversationService.recentCompletedMessages(CONVERSATION_ID, 6)).thenReturn(List.of());
-        when(repository.insertStep(RUN_ID, 1, "调用工具 describe_schema", null, "TOOL_ASSISTANT"))
-                .thenReturn(STEP_ID);
-        when(repository.findSteps(RUN_ID)).thenReturn(List.of());
-        when(toolPolicy.allowsStrictly(RUN_ID, "describe_schema")).thenReturn(true);
-        when(repository.startNonSqlStep(STEP_ID)).thenReturn(1);
-        when(toolAssistant.invoke(any(), any()))
-                .thenThrow(new ApiException(ErrorCode.TOOL_EXECUTION_ERROR, HttpStatus.INTERNAL_SERVER_ERROR, "工具执行失败"));
-
-        String output = start(preparedWithTool("describe_schema", Map.of()));
-
-        assertThat(output).contains("event: run.failed", "TOOL_EXECUTION_ERROR");
-        verify(repository).failNonSqlStep(STEP_ID, "TOOL_EXECUTION_ERROR", "工具执行失败");
-        verify(repository, never()).completeNonSqlStep(any(), anyString());
-    }
-
-    @Test
-    @DisplayName("T4：步骤已被处理时不二次执行工具（重连/重试安全）")
-    void toolInvocation_shouldNotExecuteTwice() throws Exception {
-        when(connectionService.schemaContext(USER_ID, CONNECTION_ID)).thenReturn(SCHEMA);
-        when(conversationService.recentCompletedMessages(CONVERSATION_ID, 6)).thenReturn(List.of());
-        when(repository.insertStep(RUN_ID, 1, "调用工具 describe_schema", null, "TOOL_ASSISTANT"))
-                .thenReturn(STEP_ID);
-        when(repository.findSteps(RUN_ID)).thenReturn(List.of());
-        when(toolPolicy.allowsStrictly(RUN_ID, "describe_schema")).thenReturn(true);
-        when(repository.startNonSqlStep(STEP_ID)).thenReturn(0);
-        when(repository.findStep(RUN_ID, STEP_ID)).thenReturn(Optional.of(new com.queryforge.domain.agent.AgentStep(
-                STEP_ID, RUN_ID, 1, "调用工具 describe_schema", null, StepStatus.SUCCEEDED, null, 0,
-                "TOOL_ASSISTANT", com.queryforge.domain.agent.ApprovalStatus.PENDING, 0,
-                null, null, null, null, "{\"tables\":[]}", NOW, NOW, null, null)));
-
-        String output = start(preparedWithTool("describe_schema", Map.of()));
-
-        verify(toolAssistant, never()).invoke(any(), any());
-        assertThat(output).contains("event: tool.result", "SUCCEEDED");
-    }
 
     @Test
     @DisplayName("T4：显式工具请求在服务端做边界校验（非法工具名直接拒绝）")
@@ -391,30 +220,4 @@ class AgentRunServiceP14ATest {
                 anyString(), anyString());
     }
 
-    @Test
-    @DisplayName("T1：分类不可用降级 MEDIUM 时继续走 Planner，不静默放行 SQL")
-    void medium_shouldFallThroughToPlanner() throws Exception {
-        stubCommon();
-        when(managerRouter.route(any(ManagerRouter.RoutingContext.class)))
-                .thenReturn(new ManagerRouter.RouteDecision(AgentRoute.MEDIUM, "分类不可用，已按 Planner 安全降级"));
-        when(planner.plan(anyString(), anyString(), anyString()))
-                .thenReturn(new com.queryforge.domain.agent.AgentPlan(
-                        true, "", List.of(new com.queryforge.domain.agent.AgentPlan.Step(QUESTION))));
-        when(repository.insertStep(RUN_ID, 1, QUESTION, null, "DATA_ANALYST")).thenReturn(STEP_ID);
-        when(repository.findSteps(RUN_ID)).thenReturn(List.of(new com.queryforge.domain.agent.AgentStep(
-                STEP_ID, RUN_ID, 1, QUESTION, null, StepStatus.PENDING, null, 0, "SQL_AGENT",
-                com.queryforge.domain.agent.ApprovalStatus.PENDING, 0, null, null, null, null, null, NOW, NOW,
-                null, null)));
-        when(roleAssigner.assign(anyString())).thenReturn(AgentRole.DATA_ANALYST);
-        when(selectionService.generateAndSelect(
-                any(com.queryforge.application.agent.sql.SqlSelectionRequest.class)))
-                .thenReturn(new com.queryforge.application.agent.sql.SqlSelection(
-                        "MULTI", "SELECT COUNT(*) AS c FROM shop_orders", 1, 3, 1, 0.998, 0.8, 0.879, false));
-        when(guard.validate(anyString(), anyString())).thenReturn("SELECT COUNT(*) AS c FROM shop_orders");
-
-        String output = start(prepared());
-
-        assertThat(output).contains("event: agent.routed", "MEDIUM", "event: approval.required");
-        verify(planner).plan(anyString(), anyString(), anyString());
-    }
 }

@@ -17,6 +17,8 @@ public enum ErrorCode {
     AGENT_STATE_CONFLICT,
     AGENT_PLAN_INVALID,
     AGENT_STEP_FAILED,
+    /** P14-E：计划中的工具步骤缺少真实工具身份/参数，拒绝猜测执行。 */
+    TOOL_INVOCATION_INCOMPLETE,
     SQL_NOT_ALLOWED,
     SQL_EXECUTION_ERROR,
     MODEL_NOT_CONFIGURED,

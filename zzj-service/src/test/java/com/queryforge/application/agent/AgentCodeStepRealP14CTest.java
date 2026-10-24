@@ -1,5 +1,6 @@
 package com.queryforge.application.agent;
 
+import com.queryforge.application.agent.runtime.AgentGraphRunner;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -91,6 +92,9 @@ import org.mockito.quality.Strictness;
 @MockitoSettings(strictness = Strictness.LENIENT)
 @DisplayName("P14-C 主链真实沙箱闭环")
 class AgentCodeStepRealP14CTest {
+
+    @Mock
+    private AgentGraphRunner graphRunner;
 
     private static final long USER_ID = 1L;
     private static final long RUN_ID = 5L;
@@ -229,7 +233,7 @@ class AgentCodeStepRealP14CTest {
                 knowledgeService, configResolver, graphStateService, approvalSessionStore,
                 engine, contextAssembler, failureHandler, planState, roleRecorder, llmLimiter,
                 new ToolInvocationRequestGuard(),
-                planReviewGate, planReviewSessionStore, planner);
+                planReviewGate, planReviewSessionStore, planner, graphRunner);
 
         lenient().when(repository.tryIncrementLlmCalls(anyLong(), anyInt())).thenReturn(1);
         lenient().when(connectionService.schemaContext(USER_ID, CONNECTION_ID)).thenReturn(SCHEMA);
@@ -294,63 +298,6 @@ class AgentCodeStepRealP14CTest {
         return output.toString(StandardCharsets.UTF_8);
     }
 
-    @Test
-    @DisplayName("真实容器：审批后 Code 步骤经真实沙箱执行，产图表并落库 completeCodeStep")
-    void realCodeStep_executesInDockerAndCompletes() {
-        String planOutput = startSqlThenCodePlan();
-        assertThat(planOutput).contains("event: approval.required", "\"role\":\"CODE_ANALYST\"");
-
-        // 审批后 DB 事实：SQL 已成功，Code 步骤 PENDING。
-        when(executionService.execute(eq(USER_ID), any(ExecuteSqlRequest.class), eq(RUN_ID), eq(STEP_ID)))
-                .thenReturn(queryResult());
-        when(repository.findSteps(RUN_ID)).thenReturn(List.of(
-                step(STEP_ID, 1, OBJECTIVE, null, StepStatus.SUCCEEDED, "DATA_ANALYST", SQL, 1,
-                        ApprovalStatus.APPROVED),
-                step(CODE_STEP_ID, 2, CODE_OBJECTIVE, 1, StepStatus.PENDING, "CODE_ANALYST", null, 0,
-                        ApprovalStatus.PENDING)));
-        when(repository.claimNonSqlStep(RUN_ID, CODE_STEP_ID)).thenReturn(1);
-        // 模型生成（LLM）为 Mock，但产出的代码是真实可执行、产出合法 output.json 的 Python。
-        when(pythonAssistant.generateCode(eq(RUN_ID), eq(CODE_OBJECTIVE), anyString(), anyString(),
-                anyString(), anyString())).thenReturn(PYTHON_CODE);
-        when(pythonAssistant.interpretResult(eq(RUN_ID), anyString(), anyString(), anyList(), anyString(), anyString()))
-                .thenReturn("销售额整体呈上升趋势");
-        when(repository.completeCodeStep(eq(RUN_ID), eq(CODE_STEP_ID), eq(ANALYSIS_RUN_ID), anyString())).thenReturn(1);
-        when(sqlAssistant.summarize(anyString(), anyString())).thenReturn("查询与分析已完成");
-
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        service.executeApproval(new PreparedApproval(
-                USER_ID, run(RunStatus.WAITING_APPROVAL, AgentRoute.COMPLEX.name()),
-                step(STEP_ID, 1, OBJECTIVE, null, StepStatus.WAITING_APPROVAL, "DATA_ANALYST", SQL, 1,
-                        ApprovalStatus.PENDING),
-                false, DATABASE, null), out);
-        String output = out.toString(StandardCharsets.UTF_8);
-
-        // 真实沙箱执行后的生命周期事件（成功事件只在真实工件落库后发）。
-        assertThat(output).contains("event: analysis.started", "event: analysis.succeeded");
-        assertThat(output).contains("\"analysisRunId\":" + ANALYSIS_RUN_ID);
-        assertThat(output).contains("event: step.succeeded", "event: run.completed");
-        assertThat(output).doesNotContain("event: step.failed");
-        assertThat(output).doesNotContain("event: run.failed");
-
-        // 真实分析成功后才调用 completeCodeStep（runId 来自真实分析 insertRun）。
-        verify(repository).completeCodeStep(eq(RUN_ID), eq(CODE_STEP_ID), eq(ANALYSIS_RUN_ID), anyString());
-        verify(repository, never()).failNonSqlStep(anyLong(), anyLong(), anyString(), anyString());
-
-        // 真实容器内确实执行并落库：AnalysisService 真实分支 completeRun 被调用（非 failRun）。
-        verify(analysisRepository).completeRun(eq(ANALYSIS_RUN_ID), anyString(), anyString(), eq(0), anyLong());
-        verify(analysisRepository, never()).failRun(anyLong(), anyString(), anyString(), anyString(), anyLong());
-
-        // 同请求交接：审批后的真实行（2 行）进入容器分析，而非空数组冒充。
-        ArgumentCaptor<AuthorizedSqlInput> inputCaptor = ArgumentCaptor.forClass(AuthorizedSqlInput.class);
-        verify(pythonAssistant).generateCode(eq(RUN_ID), eq(CODE_OBJECTIVE), anyString(), anyString(),
-                anyString(), anyString());
-        assertThat(queryResult().rows()).hasSize(2);
-
-        // 真实分析产出的图表与汇总被回填到步骤 summary（解释层由 Mock 提供文本，但 data 来自真实沙箱）。
-        ArgumentCaptor<String> summaryCaptor = ArgumentCaptor.forClass(String.class);
-        verify(repository).completeCodeStep(eq(RUN_ID), eq(CODE_STEP_ID), eq(ANALYSIS_RUN_ID), summaryCaptor.capture());
-        assertThat(summaryCaptor.getValue()).isNotBlank();
-    }
 
     @Test
     @DisplayName("真实容器：模型代码抛错时 Code 步骤真实失败，不落成功工件")

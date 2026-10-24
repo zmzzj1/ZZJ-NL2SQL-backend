@@ -22,7 +22,12 @@ public record AgentRunResponse(
         LocalDateTime updatedAt,
         List<AgentStepResponse> steps,
         String graphState,
-        PlanReviewView planReview
+        PlanReviewView planReview,
+        /**
+         * P14-ARCH-01：真实六 Agent Graph 的 threadId（runId↔threadId 归属映射）。
+         * 旧 Run 为 null（无可恢复 Graph）；浏览器端不能凭 threadId 绕过服务端身份验证。
+         */
+        String threadId
 ) {
     public record RoleActivity(String role, String status) {
     }

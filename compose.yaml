@@ -1,0 +1,233 @@
+name: queryforge
+
+x-java-service: &java-service
+  restart: unless-stopped
+  networks:
+    - queryforge
+  environment: &java-environment
+    TZ: Asia/Shanghai
+    SERVER_ADDRESS: 0.0.0.0
+    MANAGEMENT_DB_URL: jdbc:mysql://mysql:3306/sql_platform?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowMultiQueries=false&allowPublicKeyRetrieval=true&useSSL=false
+    MANAGEMENT_DB_USERNAME: platform_app
+    MANAGEMENT_DB_PASSWORD: ${MYSQL_APP_PASSWORD:?set MYSQL_APP_PASSWORD in docker/.env}
+    REDIS_HOST: redis
+    REDIS_PORT: 6379
+    PG_URL: jdbc:postgresql://postgres:5432/rageng
+    PG_USERNAME: postgres
+    PG_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in docker/.env}
+    NACOS_SERVER_ADDR: nacos:8848
+    NACOS_REGISTER_IP: ""
+    SPRING_CLOUD_NACOS_DISCOVERY_NETWORK_INTERFACE: eth0
+    MCP_ECHO_SCRIPT: /app/tools/mcp-echo-server.mjs
+  volumes:
+    - ./config:/app/config:ro
+
+services:
+  mysql:
+    image: mysql:8.4.11
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    environment:
+      TZ: Asia/Shanghai
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in docker/.env}
+      MYSQL_APP_PASSWORD: ${MYSQL_APP_PASSWORD:?set MYSQL_APP_PASSWORD in docker/.env}
+      DEMO_A_PASSWORD: ${DEMO_A_PASSWORD:?set DEMO_A_PASSWORD in docker/.env}
+      DEMO_B_PASSWORD: ${DEMO_B_PASSWORD:?set DEMO_B_PASSWORD in docker/.env}
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/mysql-init:/docker-entrypoint-initdb.d:ro
+      - ./zzj-service/src/main/resources/db:/queryforge-db:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks:
+      - queryforge
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - queryforge
+
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg17
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      POSTGRES_DB: rageng
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in docker/.env}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./zzj-service/src/main/resources/db/13-p12-pgvector.sql:/docker-entrypoint-initdb.d/01-pgvector.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d rageng"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks:
+      - queryforge
+
+  nacos:
+    image: nacos/nacos-server:v3.2.4
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      MODE: standalone
+      FUNCTION_MODE: all
+      PREFER_HOST_MODE: hostname
+      NACOS_AUTH_ENABLE: "false"
+      JVM_XMS: 256m
+      JVM_XMX: 512m
+      JVM_XMN: 128m
+    ports:
+      - "${NACOS_CONSOLE_PORT:-8082}:8080"
+      - "${NACOS_PORT:-8848}:8848"
+      - "${NACOS_GRPC_PORT:-9848}:9848"
+      - "${NACOS_RAFT_PORT:-9849}:9849"
+    volumes:
+      - nacos_data:/home/nacos/data
+      - nacos_logs:/home/nacos/logs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8848/nacos/actuator/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+    networks:
+      - queryforge
+
+  zzj-service:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MODULE: zzj-service
+    environment:
+      <<: *java-environment
+      SERVER_PORT: 8081
+      SERVICE_APP_NAME: zzj-service
+    ports:
+      - "${SERVICE_PORT:-8081}:8081"
+    volumes:
+      - ./config:/app/config:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      nacos:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 45s
+
+  zzj-admin:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MODULE: zzj-admin
+    environment:
+      <<: *java-environment
+      ADMIN_PORT: 8083
+      ADMIN_APP_NAME: zzj-admin
+    ports:
+      - "${ADMIN_PORT:-8083}:8083"
+    depends_on:
+      redis:
+        condition: service_healthy
+      nacos:
+        condition: service_healthy
+      zzj-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8083/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  zzj-gateway:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MODULE: zzj-gateway
+    environment:
+      <<: *java-environment
+      SERVER_PORT: 8080
+      GATEWAY_APP_NAME: zzj-gateway
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    depends_on:
+      nacos:
+        condition: service_healthy
+      zzj-service:
+        condition: service_healthy
+      zzj-admin:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-5174}:80"
+    depends_on:
+      zzj-gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - queryforge
+
+networks:
+  queryforge:
+    driver: bridge
+
+volumes:
+  mysql_data:
+  redis_data:
+  postgres_data:
+  nacos_data:
+  nacos_logs:

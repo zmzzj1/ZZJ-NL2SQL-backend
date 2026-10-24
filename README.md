@@ -1,6 +1,6 @@
 # QueryForge 后端（真实用户与多数据源）
 
-Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性；P10 新增工作流定时调度与安全 CSV 导出；P11 新增统一 Agent 执行内核；P13 将公开入口拆为 Gateway，新增通过 Dubbo 查询核心业务数据的独立 Admin 服务，并把 Docker Python 隔离执行下沉为可复用 Sandbox 模块；P14-A 完成自适应 Manager 路由、分层上下文真实入模和用户显式工具调用闭环；P14-B/P14-C 新增 SQL 多候选筛选，以及 SQL 审批后衔接隔离 Python 分析与报告生成的依赖链；P14-D/P14-E 新增高风险计划人工审核、拒绝后重规划，以及用户级 MCP 服务生命周期和工具发现。
+Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL 连接管理、会话与查询历史、SSE SQL 生成、只读执行、Agent 多步运行、业务知识检索、隔离数据分析、HTML 报告、MCP 工具接入、可视化工作流、Agent Studio、Skill Registry、工作空间、混合 RAG 与长期记忆；P9 新增统一模型治理、路由、配额与可观测性；P10 新增工作流定时调度与安全 CSV 导出；P11 新增统一 Agent 执行内核；P13 将公开入口拆为 Gateway，新增通过 Dubbo 查询核心业务数据的独立 Admin 服务，并把 Docker Python 隔离执行下沉为可复用 Sandbox 模块；P14-A 完成自适应 Manager 路由、分层上下文真实入模和用户显式工具调用闭环；P14-B/P14-C 新增 SQL 多候选筛选，以及 SQL 审批后衔接隔离 Python 分析与报告生成的依赖链；P14-D/P14-E 新增高风险计划人工审核、拒绝后重规划、用户级 MCP 服务生命周期和工具发现，以及计划内受控工具步骤；P14-ARCH-01 将主执行链收敛为 Spring AI Alibaba StateGraph，并以 Redis checkpoint 支持线程级暂停与恢复。
 
 ## 环境要求
 
@@ -17,9 +17,10 @@ Java 21 + Spring Boot 3.5.6 + Spring Security 6 + Maven。提供认证、MySQL �
 - Manager 使用当前问题、授权 Schema/知识摘要和压缩会话历史进行结构化路由；模型分类不可用时安全降级到 Planner，并保留多角色轨迹和 LLM 调用次数限制。
 - 中复杂度 SQL 生成最多三个候选，经只读 Guard 过滤并结合规则分与模型分确定唯一待审批 SQL；简单查询保持单候选路径，调用预算采用原子计数。
 - Agent 步骤支持显式角色与依赖：只有用户批准并真实执行的 SQL 结果才能进入隔离 Python 分析，分析产物再交给报告步骤；分析/报告 ID 和新增 SSE 事件均持久化，失败时不会绕过审批或回退宿主机。
+- Agent 主执行链使用 StateGraph 编排 Manager、Planner、专业 Worker、验证、人工审核与结束节点；运行状态按线程写入 Redis checkpoint，恢复时继续复用持久化计划、步骤和审批事实。
 - 复杂计划可选择进入计划级风险审核：审核状态和版本持久化，批准后才开始执行，拒绝意见用于重新规划；一次性领取、版本校验和拒绝次数上限避免重复提交，且不替代逐条 SQL 审批。
 - 业务知识 CRUD、按连接鉴权检索和会话记忆摘要。
-- 受控工具注册表（只读工具 + 审计）与用户级 MCP 服务管理：支持连接、断开、状态和工具发现；STDIO 只能选择服务端预配置白名单服务，远程 SSE 地址必须通过出站 URL 防护。用户可显式选择一次工具调用，服务端执行参数边界校验、角色能力与 Agent 白名单双层授权、幂等领取和递归脱敏摘要。
+- 受控工具注册表（只读工具 + 审计）与用户级 MCP 服务管理：支持连接、断开、状态和工具发现；STDIO 只能选择服务端预配置白名单服务，远程 SSE 地址必须通过出站 URL 防护。用户可显式选择一次工具调用，Planner 也可生成携带真实工具身份和受控参数的工具步骤；两条路径都执行参数边界校验、角色能力与 Agent 白名单双层授权、幂等领取和递归脱敏摘要。
 - 隔离 Python 数据分析：`zzj-sandbox` 以普通 JAR 提供一次性 Docker 容器、非 root、禁网、只读根、资源/时间/输出限制和强制清理；运行时不可用时拒绝回退宿主机。另含内置确定性分析器。
 - 结构化图表（table/bar/line/pie）与净化 HTML 报告（CSP + 沙箱预览）。
 - 可视化工作流 DAG（校验、版本化、串行执行、SQL 审批暂停/恢复、SSE）。
@@ -116,6 +117,32 @@ Spring 属性（通过 `--app.*=value` 或外部配置传入）：
 | 属性 | 说明 |
 | --- | --- |
 | `app.llm.use-spring-ai` | 是否用 Spring AI ChatClient 作为底层模型传输层；默认 `false`（用内置 HTTP 客户端）。无论取值，统一入口都是 `RoutedLlmClient`，路由/配额/审计/熔断/故障转移语义不变，Spring AI 只替换最底层的 I/O 实现 |
+
+## Docker 一键环境
+
+仓库根目录的 `compose.yaml` 会构建并启动完整本地栈：MySQL 8.4、Redis 7.4、PostgreSQL 17 +
+pgvector 0.8.7、Nacos 3.2.4、Service、Gateway、Admin 和前端 Nginx。数据库与 Nacos 数据保存在
+Docker named volumes 中，普通停止和再次启动不会丢失。
+
+首次使用前需保证 Docker Desktop 守护进程已运行。启动脚本会生成不入库的本机数据库密码，并校验模型密钥与
+加密密钥等本机私密配置是否齐全；容器内数据库、Redis、PostgreSQL 和 Nacos 地址由 Compose 环境变量覆盖。
+首次构建还需要 Docker Desktop 能访问 Docker Hub；若拉取基础镜像时报 `auth.docker.io` 超时，请先在 Docker
+Desktop 中配置可用的网络代理或镜像加速器，再重新执行启动脚本。
+
+Windows 推荐直接运行：
+
+```powershell
+# 在 backend/ 下执行；首次运行自动生成随机本地数据库密码
+powershell -ExecutionPolicy Bypass -File docker/start.ps1
+
+# 停止容器但保留全部 named volumes
+powershell -ExecutionPolicy Bypass -File docker/stop.ps1
+```
+
+默认入口为 `http://127.0.0.1:5174/`，Nacos 控制台为 `http://127.0.0.1:8082/`。启动脚本会在启动前
+检查 5174、8080–8083、8848、9848–9849、3306、6379 和 5432；若本机版服务仍占用端口，会停止并提示，
+不会擅自终止现有进程。MySQL 初始化复用 `zzj-service/src/main/resources/db/` 中的版本化 SQL；代码分析容器通过
+Docker socket 启动隔离沙箱，因此该 Compose 仅面向可信的本地开发环境。
 
 ## 启动与测试
 
@@ -264,7 +291,7 @@ $env:LLM_BASE_URL='http://127.0.0.1:9099/v1'; $env:LLM_API_KEY='stub-key'; mvn s
 
 ## 测试
 
-- P14-D/P14-E 全量验证：`mvn verify` 共 612 个自动化用例（`zzj-common` 6 个、`zzj-sandbox` 8 个、`zzj-service` 546 个、`zzj-gateway` 38 个、`zzj-admin` 14 个；0 failures/0 errors/22 skipped，2026-10-23 实跑）。新增覆盖计划风险 Gate、审核版本与一次性领取、批准/拒绝重规划、MCP 配置归属、连接生命周期、工具发现、参数校验/修复和传输失败边界。
+- P14-ARCH-01 全量验证：`mvn -o test` 共 615 个已跟踪自动化用例（`zzj-common` 6 个、`zzj-sandbox` 8 个、`zzj-service` 549 个、`zzj-gateway` 38 个、`zzj-admin` 14 个；0 failures/0 errors/21 skipped，2026-10-24 实跑）。新增覆盖 StateGraph 主执行链、消息总线与专业 Worker、checkpoint 恢复、HITL 并发、计划工具步骤和旧接口兼容性。
 - P14-B/P14-C 全量验证：`mvn verify` 共 561 个自动化用例（`zzj-common` 6 个、`zzj-sandbox` 8 个、`zzj-service` 495 个、`zzj-gateway` 38 个、`zzj-admin` 14 个；0 failures/0 errors/22 skipped，2026-10-23 实跑）。新增覆盖多候选 Guard/评分/回退、原子调用预算、角色依赖与分派、批准 SQL 结果交接、分析与报告产物持久化、SSE 事件及真实沙箱条件检查。
 - P14-A 全量验证：`mvn verify` 共 481 个自动化用例（`zzj-common` 6 个、`zzj-sandbox` 8 个、`zzj-service` 415 个、`zzj-gateway` 38 个、`zzj-admin` 14 个；0 failures/0 errors/17 skipped，2026-10-23 实跑）。新增覆盖 Manager 安全降级、闲聊/澄清状态、显式工具调用、双层授权、参数边界、递归输出脱敏和分层上下文真实注入。
 - P13-M4 全量验证：`mvn verify` 共 432 个自动化用例（`zzj-common` 6 个、`zzj-sandbox` 8 个、`zzj-service` 366 个、`zzj-gateway` 38 个、`zzj-admin` 14 个；0 failures/0 errors/17 skipped，2026-10-22 实跑）。其中 5 个真实 Docker 安全/资源探针因当前 Docker 守护进程不可访问而如实跳过，其余跳过项为缺少对应外部测试条件的集成测试。

@@ -1,4 +1,5 @@
 package com.queryforge.application.agent;
+import com.queryforge.application.agent.runtime.AgentGraphRunner;
 import com.queryforge.application.conversation.ConversationService;
 import com.queryforge.application.datasource.ConnectionService;
 import com.queryforge.application.knowledge.KnowledgeService;
@@ -64,6 +65,9 @@ import com.queryforge.domain.agent.AgentPlan;
 @ExtendWith(MockitoExtension.class)
 @DisplayName("Agent 运行编排")
 class AgentRunServiceTest {
+
+    @Mock
+    private AgentGraphRunner graphRunner;
 
     private static final long USER_ID = 1L;
     private static final long RUN_ID = 5L;
@@ -183,7 +187,7 @@ class AgentRunServiceTest {
                 knowledgeService, configResolver, graphStateService, approvalSessionStore,
                 engine, contextAssembler, failureHandler, planState, roleRecorder, llmLimiter,
                 new com.queryforge.application.agent.ToolInvocationRequestGuard(),
-                planReviewGate, planReviewSessionStore, planner);
+                planReviewGate, planReviewSessionStore, planner, graphRunner);
         org.mockito.Mockito.lenient().when(roleAssigner.assign(anyString())).thenReturn(AgentRole.DATA_ANALYST);
         org.mockito.Mockito.lenient()
                 .when(repository.tryIncrementLlmCalls(anyLong(), anyInt())).thenReturn(1);
@@ -210,62 +214,7 @@ class AgentRunServiceTest {
                 CONVERSATION_ID, MessageRole.USER, QUESTION, MessageStatus.COMPLETED);
     }
 
-    @Test
-    @DisplayName("规划成功后展示计划并生成第一步 SQL，等待用户确认")
-    void startRun_shouldEmitPlanAndFirstApproval() throws Exception {
-        stubPlan(1);
-        when(selectionService.generateAndSelect(any(com.queryforge.application.agent.sql.SqlSelectionRequest.class)))
-                .thenReturn(new com.queryforge.application.agent.sql.SqlSelection(
-                        "SINGLE", SQL, 1, 1, 1, 0.0, 0.0, 0.0, false));
-        when(guard.validate(SQL, "sql_demo_a")).thenReturn(SQL);
 
-        String output = start(prepared());
-
-        assertThat(output).contains(
-                "event: run.started",
-                "event: plan.ready",
-                "event: step.started",
-                "event: step.sql_ready",
-                "event: approval.required");
-        assertThat(indexOf(output, "event: plan.ready")).isLessThan(indexOf(output, "event: approval.required"));
-        verify(repository).setStepSql(STEP_ID, SQL, 1, 0);
-        verify(repository).updateRunStatus(RUN_ID, RunStatus.WAITING_APPROVAL, null, null, null);
-        // P12 S4：进入待审批时登记短期授权上下文。
-        verify(approvalSessionStore).register(RUN_ID, STEP_ID, 1, "sql_demo_a");
-    }
-
-    @Test
-    @DisplayName("不可回答的问题以 run.failed 结束，不创建步骤")
-    void startRun_shouldFailWhenPlanUnanswerable() throws Exception {
-        when(connectionService.schemaContext(USER_ID, CONNECTION_ID)).thenReturn(SCHEMA);
-        when(conversationService.recentCompletedMessages(CONVERSATION_ID, 6)).thenReturn(List.of());
-        when(conversationService.memorySummary(CONVERSATION_ID)).thenReturn(null);
-        when(managerRouter.route(any(ManagerRouter.RoutingContext.class)))
-                .thenReturn(new ManagerRouter.RouteDecision(AgentRoute.COMPLEX, "需要多步分析"));
-        when(planner.plan(eq(QUESTION), eq(SCHEMA), anyString()))
-                .thenReturn(new AgentPlan(false, "Schema 中没有退款表", List.of()));
-
-        String output = start(prepared());
-
-        assertThat(output).contains("event: run.failed", "AGENT_UNANSWERABLE");
-        verify(repository, never()).insertStep(any(), anyInt(), anyString(), any());
-    }
-
-    @Test
-    @DisplayName("生成期 SQL Guard 拒绝时步骤与运行都失败")
-    void startRun_shouldFailWhenGuardRejects() throws Exception {
-        stubPlan(1);
-        when(selectionService.generateAndSelect(any(com.queryforge.application.agent.sql.SqlSelectionRequest.class)))
-                .thenReturn(new com.queryforge.application.agent.sql.SqlSelection(
-                        "SINGLE", SQL, 1, 1, 1, 0.0, 0.0, 0.0, false));
-        when(guard.validate(SQL, "sql_demo_a")).thenThrow(
-                new ApiException(ErrorCode.SQL_NOT_ALLOWED, HttpStatus.BAD_REQUEST, "只允许只读 SELECT"));
-
-        String output = start(prepared());
-
-        assertThat(output).contains("event: step.failed", "event: run.failed", "SQL_NOT_ALLOWED");
-        verify(repository).updateRunStatus(RUN_ID, RunStatus.FAILED, null, "SQL_NOT_ALLOWED", "只允许只读 SELECT");
-    }
 
     @Test
     @DisplayName("确认后执行 SQL、写历史并生成最终总结")

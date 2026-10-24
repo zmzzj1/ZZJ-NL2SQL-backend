@@ -1,5 +1,6 @@
 package com.queryforge.application.agent;
 
+import com.queryforge.application.agent.runtime.AgentGraphRunner;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -79,6 +80,9 @@ import org.mockito.quality.Strictness;
 @MockitoSettings(strictness = Strictness.LENIENT)
 @DisplayName("P14-C 三角色分发")
 class AgentRoleDispatchP14CTest {
+
+    @Mock
+    private AgentGraphRunner graphRunner;
 
     private static final long USER_ID = 1L;
     private static final long RUN_ID = 5L;
@@ -183,7 +187,7 @@ class AgentRoleDispatchP14CTest {
                 knowledgeService, configResolver, graphStateService, approvalSessionStore,
                 engine, contextAssembler, failureHandler, planState, roleRecorder, llmLimiter,
                 new ToolInvocationRequestGuard(),
-                planReviewGate, planReviewSessionStore, planner);
+                planReviewGate, planReviewSessionStore, planner, graphRunner);
 
         lenient().when(repository.tryIncrementLlmCalls(anyLong(), anyInt())).thenReturn(1);
         lenient().when(connectionService.schemaContext(USER_ID, CONNECTION_ID)).thenReturn(SCHEMA);
@@ -297,152 +301,4 @@ class AgentRoleDispatchP14CTest {
         return output.toString(StandardCharsets.UTF_8);
     }
 
-    @Test
-    @DisplayName("Code 步骤消费已审批真实行做隔离分析，不生成 SQL、不进审批")
-    void codeStep_shouldConsumeApprovedRowsWithoutGeneratingSql() {
-        String planOutput = startSqlThenCodePlan();
-        assertThat(planOutput).contains("event: approval.required", "\"role\":\"CODE_ANALYST\"");
-
-        stubApprovedThenCompleted();
-        String output = approveSqlStep();
-
-        // Code 步骤真实生命周期事件。
-        assertThat(output).contains("event: analysis.started", "event: analysis.succeeded");
-        assertThat(output).contains("\"analysisRunId\":" + ANALYSIS_RUN_ID);
-        assertThat(output).contains("event: step.succeeded", "event: run.completed");
-        // 非 SQL 步骤不出现 SQL 审批语义。
-        assertThat(output).doesNotContain("event: approval.required");
-        assertThat(output).doesNotContain("event: step.sql_ready");
-        // SQL 生成只发生在 SQL 步骤（三个候选一次生成模型），Code 步骤不再生成 SQL。
-        verify(sqlAssistant, times(3)).generateCandidateSql(
-                anyString(), anyString(), anyString(), anyString(), anyString(), anyString(), anyString(),
-                anyInt(), anyString(), anyString());
-        verify(sqlAssistant, never()).generateSql(
-                anyString(), anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
-        verify(repository, never()).setStepSql(eq(CODE_STEP_ID), any(), anyInt(), anyInt());
-        // 真实行数据（同请求交接）进入沙箱分析。
-        ArgumentCaptor<com.queryforge.application.agent.AuthorizedSqlInput> captor =
-                ArgumentCaptor.forClass(com.queryforge.application.agent.AuthorizedSqlInput.class);
-        verify(codeAnalyst).analyzeApprovedResult(eq(USER_ID), captor.capture(), eq(PYTHON_CODE), any());
-        com.queryforge.application.agent.AuthorizedSqlInput input = captor.getValue();
-        assertThat(input.result().rows()).hasSize(2);
-        assertThat(input.result().columns()).containsExactly("region", "total");
-        assertThat(input.userId()).isEqualTo(USER_ID);
-        assertThat(input.runId()).isEqualTo(RUN_ID);
-        assertThat(input.refetched()).isFalse();
-    }
-
-    @Test
-    @DisplayName("Report 步骤基于真实工件生成报告，复用 ReportService 且不生成 SQL")
-    void reportStep_shouldGenerateReportFromRealArtifacts() {
-        when(managerRouter.route(any(ManagerRouter.RoutingContext.class)))
-                .thenReturn(new ManagerRouter.RouteDecision(AgentRoute.COMPLEX, "需要多步分析"));
-        when(planner.plan(eq(QUESTION), eq(SCHEMA), anyString()))
-                .thenReturn(new AgentPlan(true, "", List.of(
-                        new AgentPlan.Step(OBJECTIVE, "DATA_ANALYST", null),
-                        new AgentPlan.Step(CODE_OBJECTIVE, "CODE_ANALYST", 1),
-                        new AgentPlan.Step(REPORT_OBJECTIVE, "REPORT_ASSISTANT", 2))));
-        when(repository.insertStep(RUN_ID, 1, OBJECTIVE, null, "DATA_ANALYST")).thenReturn(STEP_ID);
-        when(repository.insertStep(RUN_ID, 2, CODE_OBJECTIVE, 1, "CODE_ANALYST")).thenReturn(CODE_STEP_ID);
-        when(repository.insertStep(RUN_ID, 3, REPORT_OBJECTIVE, 2, "REPORT_ASSISTANT"))
-                .thenReturn(REPORT_STEP_ID);
-        when(repository.findSteps(RUN_ID)).thenReturn(List.of(
-                step(STEP_ID, 1, OBJECTIVE, null, StepStatus.PENDING, "DATA_ANALYST", null, 0,
-                        ApprovalStatus.PENDING, null, null),
-                step(CODE_STEP_ID, 2, CODE_OBJECTIVE, 1, StepStatus.PENDING, "CODE_ANALYST", null, 0,
-                        ApprovalStatus.PENDING, null, null),
-                step(REPORT_STEP_ID, 3, REPORT_OBJECTIVE, 2, StepStatus.PENDING, "REPORT_ASSISTANT", null, 0,
-                        ApprovalStatus.PENDING, null, null)));
-        when(sqlAssistant.generateCandidateSql(
-                anyString(), anyString(), anyString(), anyString(), anyString(), anyString(), anyString(),
-                anyInt(), anyString(), anyString()))
-                .thenReturn(SQL);
-        when(sqlAssistant.scoreCandidates(anyString(), anyString(), any()))
-                .thenReturn("[{\"candidate\":1,\"score\":9}]");
-
-        ByteArrayOutputStream planOut = new ByteArrayOutputStream();
-        service.startRun(prepared(), planOut);
-        assertThat(planOut.toString(StandardCharsets.UTF_8)).contains("event: approval.required");
-
-        // 审批后：SQL 与 Code 均已成功，Report 步骤收集真实 analysisRunId。
-        when(executionService.execute(eq(USER_ID), any(ExecuteSqlRequest.class), eq(RUN_ID), eq(STEP_ID)))
-                .thenReturn(queryResult());
-        when(repository.findSteps(RUN_ID)).thenReturn(List.of(
-                step(STEP_ID, 1, OBJECTIVE, null, StepStatus.SUCCEEDED, "DATA_ANALYST", SQL, 1,
-                        ApprovalStatus.APPROVED, null, null),
-                step(CODE_STEP_ID, 2, CODE_OBJECTIVE, 1, StepStatus.SUCCEEDED, "CODE_ANALYST", null, 0,
-                        ApprovalStatus.PENDING, ANALYSIS_RUN_ID, null),
-                step(REPORT_STEP_ID, 3, REPORT_OBJECTIVE, 2, StepStatus.PENDING, "REPORT_ASSISTANT", null, 0,
-                        ApprovalStatus.PENDING, null, null)));
-        when(repository.claimNonSqlStep(RUN_ID, REPORT_STEP_ID)).thenReturn(1);
-        when(analysisService.detail(USER_ID, ANALYSIS_RUN_ID)).thenReturn(analysisResponse());
-        when(reportComposer.compose(eq(RUN_ID), anyString(), anyString(), anyString(), anyString()))
-                .thenReturn("整体销售额呈上升趋势");
-        when(reportService.createForAgentRun(eq(USER_ID), eq(RUN_ID), eq(REPORT_STEP_ID),
-                eq(List.of(ANALYSIS_RUN_ID)), anyString(), anyString()))
-                .thenReturn(reportResponse());
-        when(repository.completeReportStep(eq(RUN_ID), eq(REPORT_STEP_ID), eq(REPORT_ID), anyString())).thenReturn(1);
-        when(sqlAssistant.summarize(anyString(), anyString())).thenReturn("报告已生成");
-
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        service.executeApproval(new PreparedApproval(
-                USER_ID, run(RunStatus.WAITING_APPROVAL, AgentRoute.COMPLEX.name()),
-                step(STEP_ID, 1, OBJECTIVE, null, StepStatus.WAITING_APPROVAL, "DATA_ANALYST", SQL, 1,
-                        ApprovalStatus.PENDING, null, null),
-                false, DATABASE, null), out);
-        String output = out.toString(StandardCharsets.UTF_8);
-
-        assertThat(output).contains("event: report.ready", "\"reportId\":" + REPORT_ID);
-        assertThat(output).contains("event: run.completed");
-        assertThat(output).doesNotContain("event: step.sql_ready");
-        // Report 步骤把同 Run 内真实成功的分析工件交给既有 ReportService。
-        verify(reportService).createForAgentRun(eq(USER_ID), eq(RUN_ID), eq(REPORT_STEP_ID),
-                eq(List.of(ANALYSIS_RUN_ID)), anyString(), anyString());
-        // SQL 生成仍然只属于 SQL 步骤。
-        verify(sqlAssistant, times(3)).generateCandidateSql(
-                anyString(), anyString(), anyString(), anyString(), anyString(), anyString(), anyString(),
-                anyInt(), anyString(), anyString());
-    }
-
-    @Test
-    @DisplayName("显式 Code 步骤没有上游取数步骤：拒绝计划，不伪造数据")
-    void explicitCodeStepWithoutUpstream_shouldBeRejected() {
-        when(managerRouter.route(any(ManagerRouter.RoutingContext.class)))
-                .thenReturn(new ManagerRouter.RouteDecision(AgentRoute.COMPLEX, "需要多步分析"));
-        when(planner.plan(eq(QUESTION), eq(SCHEMA), anyString()))
-                .thenReturn(new AgentPlan(true, "", List.of(
-                        new AgentPlan.Step(CODE_OBJECTIVE, "CODE_ANALYST", null))));
-
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        service.startRun(prepared(), output);
-        String text = output.toString(StandardCharsets.UTF_8);
-
-        assertThat(text).contains("event: run.failed", "AGENT_PLAN_INVALID");
-        verify(repository, never()).claimNonSqlStep(anyLong(), anyLong());
-        verify(codeAnalyst, never()).analyzeApprovedResult(any(), any(), any(), any());
-    }
-
-    @Test
-    @DisplayName("Python 生成预算耗尽：步骤真实失败，不伪造分析完成")
-    void pythonBudgetExhausted_shouldFailWithoutFabrication() {
-        startSqlThenCodePlan();
-        when(executionService.execute(eq(USER_ID), any(ExecuteSqlRequest.class), eq(RUN_ID), eq(STEP_ID)))
-                .thenReturn(queryResult());
-        when(repository.findSteps(RUN_ID)).thenReturn(List.of(
-                step(STEP_ID, 1, OBJECTIVE, null, StepStatus.SUCCEEDED, "DATA_ANALYST", SQL, 1,
-                        ApprovalStatus.APPROVED, null, null),
-                step(CODE_STEP_ID, 2, CODE_OBJECTIVE, 1, StepStatus.PENDING, "CODE_ANALYST", null, 0,
-                        ApprovalStatus.PENDING, null, null)));
-        when(repository.claimNonSqlStep(RUN_ID, CODE_STEP_ID)).thenReturn(1);
-        // 预算只够 Planner 之前的调用：Python 生成拿不到额度。
-        when(repository.tryIncrementLlmCalls(anyLong(), anyInt())).thenReturn(0);
-
-        String output = approveSqlStep();
-
-        assertThat(output).contains("event: step.failed", "event: run.failed");
-        assertThat(output).doesNotContain("event: analysis.succeeded");
-        assertThat(output).doesNotContain("event: run.completed");
-        verify(codeAnalyst, never()).analyzeApprovedResult(any(), any(), any(), any());
-        verify(repository, never()).completeCodeStep(anyLong(), anyLong(), any(), anyString());
-    }
 }

@@ -44,6 +44,14 @@ public class McpServerManager {
     }
 
     /**
+     * 落库前的静态校验：未批准的 STDIO 服务名、不受信的 SSE 地址在这里就被明确拒绝，
+     * 避免把必然无法连接的配置写成 {@code ACTIVE} 留下孤儿行。不建立真实连接。
+     */
+    public void validate(McpServerEntity entity) {
+        transportFactory.create(entity);
+    }
+
+    /**
      * 尝试连接并真实发现工具，注册到用户作用域。保存成功但连接失败时必须返回
      * {@code connected=false} 与受控错误，绝不声称已连通。
      */

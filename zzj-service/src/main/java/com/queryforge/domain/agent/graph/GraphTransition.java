@@ -44,11 +44,25 @@ public final class GraphTransition {
         EDGES.put(GraphNode.REPORT_GENERATION, EnumSet.of(GraphNode.COMPLETED, GraphNode.FAILED));
         EDGES.put(GraphNode.WAITING_CLARIFICATION, EnumSet.of(
                 GraphNode.PLANNING, GraphNode.CANCELED, GraphNode.FAILED));
-        // P14-D：计划级 HITL Gate 分支。
+        // P14-D：计划级 HITL Gate 分支（P14-ARCH-01 起与六 Agent 主图共用展示审计投影）。
+        // P14-ARCH-01：六 Agent 主图（真实 StateGraph 拓扑的展示审计投影）。
+        EDGES.put(GraphNode.CREATED, EnumSet.of(GraphNode.MANAGER, GraphNode.ROUTING,
+                GraphNode.CANCELED));
+        EDGES.put(GraphNode.MANAGER, EnumSet.of(
+                GraphNode.PLANNING, GraphNode.DATA_SCIENTIST, GraphNode.CODE_ASSISTANT,
+                GraphNode.TOOL_ASSISTANT, GraphNode.DASHBOARD, GraphNode.WAITING_CLARIFICATION,
+                GraphNode.COMPLETED, GraphNode.FAILED, GraphNode.CANCELED));
         EDGES.put(GraphNode.HITL_GATE, EnumSet.of(
-                GraphNode.CONTEXT_BUILDING, GraphNode.WAITING_PLAN_REVIEW));
+                GraphNode.CONTEXT_BUILDING, GraphNode.WAITING_PLAN_REVIEW,
+                GraphNode.HITL, GraphNode.MANAGER, GraphNode.FAILED));
         EDGES.put(GraphNode.WAITING_PLAN_REVIEW, EnumSet.of(
-                GraphNode.CONTEXT_BUILDING, GraphNode.PLANNING, GraphNode.FAILED, GraphNode.CANCELED));
+                GraphNode.CONTEXT_BUILDING, GraphNode.PLANNING, GraphNode.FAILED, GraphNode.CANCELED,
+                GraphNode.HITL, GraphNode.MANAGER));
+        EDGES.put(GraphNode.HITL, EnumSet.of(GraphNode.MANAGER, GraphNode.FAILED));
+        EDGES.put(GraphNode.DATA_SCIENTIST, EnumSet.of(GraphNode.MANAGER, GraphNode.FAILED));
+        EDGES.put(GraphNode.CODE_ASSISTANT, EnumSet.of(GraphNode.MANAGER, GraphNode.FAILED));
+        EDGES.put(GraphNode.TOOL_ASSISTANT, EnumSet.of(GraphNode.MANAGER, GraphNode.FAILED));
+        EDGES.put(GraphNode.DASHBOARD, EnumSet.of(GraphNode.COMPLETED, GraphNode.FAILED));
     }
 
     private GraphTransition() {

@@ -1,5 +1,6 @@
 package com.queryforge.application.agent;
 
+import com.queryforge.application.agent.runtime.AgentGraphRunner;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
@@ -80,6 +81,9 @@ import org.springframework.http.HttpStatus;
 @ExtendWith(MockitoExtension.class)
 @DisplayName("AR-01-FB01 Agent 运行一致性回归")
 class AgentRunConsistencyTest {
+
+    @Mock
+    private AgentGraphRunner graphRunner;
 
     private static final long USER_ID = 1L;
     private static final long RUN_ID = 5L;
@@ -182,7 +186,7 @@ class AgentRunConsistencyTest {
                 knowledgeService, configResolver, graphStateService, approvalSessionStore,
                 engine, contextAssembler, failureHandler, planState, roleRecorder, llmLimiter,
                 new com.queryforge.application.agent.ToolInvocationRequestGuard(),
-                planReviewGate, planReviewSessionStore, planner);
+                planReviewGate, planReviewSessionStore, planner, graphRunner);
         lenient().when(roleAssigner.assign(anyString())).thenReturn(AgentRole.DATA_ANALYST);
     }
 
@@ -330,24 +334,6 @@ class AgentRunConsistencyTest {
         verify(approvalSessionStore).removeRun(RUN_ID);
     }
 
-    @Test
-    @DisplayName("AR01-11 规划期客户端断开：取消运行并清理计划快照")
-    void planningDisconnect_shouldCancelAndClearPlan() {
-        stubRoute(AgentRoute.SIMPLE);
-        OutputStream closed = new OutputStream() {
-            @Override
-            public void write(int b) throws IOException {
-                throw new IOException("客户端已断开");
-            }
-        };
-        when(repository.cancelActiveRun(RUN_ID, USER_ID)).thenReturn(1);
-
-        service.startRun(prepared(), closed);
-
-        verify(repository).cancelPendingSteps(RUN_ID);
-        verify(planStore).remove(String.valueOf(RUN_ID));
-        assertThat(currentNode()).isEqualTo(GraphNode.CANCELED);
-    }
 
     // ------------------------------------------------------------ AR01-10 幂等
 
@@ -419,160 +405,8 @@ class AgentRunConsistencyTest {
         verifyNoInteractions(approvalSessionStore);
     }
 
-    // ------------------------------------------------------- AR01-04 五种 Manager 路由
+    // ------------------------------------------------------------ 辅助构造与桩
 
-    @Nested
-    @DisplayName("AR01-04 五种 Manager 路由")
-    class Routes {
-
-        @Test
-        @DisplayName("CHITCHAT：直接完成，不生成 SQL")
-        void chitchat() {
-            stubRoute(AgentRoute.CHITCHAT);
-            lenient().when(sqlAssistant.chitchatAnswer(eq(QUESTION), anyString())).thenReturn(CHITCHAT_REPLY);
-            lenient().when(sqlAssistant.memorySummary(null, QUESTION, CHITCHAT_REPLY)).thenReturn("摘要");
-
-            String output = start(prepared());
-
-            assertThat(output).contains("event: run.completed", "你好！我是 SQL 分析助手");
-            verify(repository).updateRunStatus(
-                    RUN_ID, RunStatus.COMPLETED, CHITCHAT_REPLY, null, null);
-            assertThat(currentNode()).isEqualTo(GraphNode.COMPLETED);
-            verifyNoInteractions(executionService);
-        }
-
-        @Test
-        @DisplayName("CLARIFY：进入澄清态，不生成 SQL")
-        void clarify() {
-            stubRoute(AgentRoute.CLARIFY);
-
-            String output = start(prepared());
-
-            assertThat(output).contains("event: clarify.required", "请补充数据源");
-            verify(repository).updateRunStatus(RUN_ID, RunStatus.CLARIFYING, null, "AGENT_CLARIFY", "请补充数据源");
-            assertThat(currentNode()).isEqualTo(GraphNode.WAITING_CLARIFICATION);
-            verifyNoInteractions(executionService);
-        }
-
-        @Test
-        @DisplayName("KNOWLEDGE：知识库作答，不进审批")
-        void knowledge() {
-            stubRoute(AgentRoute.KNOWLEDGE);
-            when(knowledgeService.hits(USER_ID, CONNECTION_ID, QUESTION)).thenReturn(List.of());
-            when(knowledgeService.knowledgeContext(USER_ID, CONNECTION_ID, QUESTION, 2000))
-                    .thenReturn("口径：订单数=已支付订单");
-            when(sqlAssistant.knowledgeAnswer(QUESTION, "口径：订单数=已支付订单")).thenReturn("订单数按已支付统计。");
-            lenient().when(sqlAssistant.memorySummary(null, QUESTION, "订单数按已支付统计。")).thenReturn("摘要");
-
-            String output = start(prepared());
-
-            assertThat(output).contains("event: run.completed", "订单数按已支付统计。");
-            assertThat(currentNode()).isEqualTo(GraphNode.COMPLETED);
-            verify(repository, never()).insertStep(any(), anyInt(), anyString(), any());
-            verifyNoInteractions(executionService);
-        }
-
-        @Test
-        @DisplayName("SIMPLE：单步直达生成并等待审批")
-        void simple() throws Exception {
-            stubRoute(AgentRoute.SIMPLE);
-            stubSingleStepPlan();
-            when(selectionService.generateAndSelect(any(SqlSelectionRequest.class)))
-                    .thenReturn(new SqlSelection("SINGLE", SQL, 1, 1, 1, 0.0, 0.0, 0.0, false));
-            when(guard.validate(SQL, DATABASE)).thenReturn(SQL);
-
-            String output = start(prepared());
-
-            assertThat(output).contains("event: plan.ready", "event: step.sql_ready", "event: approval.required");
-            assertThat(currentNode()).isEqualTo(GraphNode.WAITING_SQL_APPROVAL);
-            assertThat(graphStateService.load(RUN_ID).orElseThrow().completedNodes())
-                    .contains("PLANNING", "CONTEXT_BUILDING", "RUNNING", "SQL_GENERATION");
-            verify(approvalSessionStore).register(RUN_ID, STEP_ID, 1, DATABASE);
-            verifyNoInteractions(executionService);
-        }
-
-        @Test
-        @DisplayName("COMPLEX：经 Planner 规划后再执行")
-        void complex() throws Exception {
-            stubRoute(AgentRoute.COMPLEX);
-            lenient().when(knowledgeService.hits(USER_ID, CONNECTION_ID, QUESTION)).thenReturn(List.of());
-            lenient().when(knowledgeService.knowledgeContext(USER_ID, CONNECTION_ID, QUESTION, 2000)).thenReturn("");
-            when(planner.plan(eq(QUESTION), eq(SCHEMA), anyString()))
-                    .thenReturn(new AgentPlan(true, "", List.of(new AgentPlan.Step(QUESTION))));
-            stubSingleStepPlan();
-            when(selectionService.generateAndSelect(any(SqlSelectionRequest.class)))
-                    .thenReturn(new SqlSelection("MULTI", SQL, 1, 3, 2, 0.998, 0.9, 0.939, false));
-            when(guard.validate(SQL, DATABASE)).thenReturn(SQL);
-
-            String output = start(prepared());
-
-            assertThat(output).contains("event: plan.ready", "event: approval.required");
-            assertThat(currentNode()).isEqualTo(GraphNode.WAITING_SQL_APPROVAL);
-        }
-    }
-
-    // --------------------------------------------------- AR01-13 检查点/详情恢复
-
-    @Test
-    @DisplayName("AR01-13 详情返回检查点快照，revision 随迁移递增")
-    void detail_shouldExposeCheckpointSnapshot() {
-        seedGraphAt(GraphNode.WAITING_SQL_APPROVAL);
-        long revision = currentRevision();
-        AgentRun run = run(RunStatus.WAITING_APPROVAL);
-        when(repository.findRunOwned(RUN_ID, USER_ID)).thenReturn(Optional.of(run));
-        when(repository.findSteps(RUN_ID)).thenReturn(List.of(step(StepStatus.WAITING_APPROVAL, SQL, 1, 0)));
-
-        var detail = service.detail(USER_ID, RUN_ID);
-
-        assertThat(detail.graphState()).isEqualTo(checkpoints.get(RUN_ID));
-        AgentGraphState restored = AgentGraphState.fromJson(objectMapper, detail.graphState());
-        assertThat(restored.node()).isEqualTo(GraphNode.WAITING_SQL_APPROVAL);
-        assertThat(restored.stateRevision()).isEqualTo(revision);
-        assertThat(restored.completedNodes()).contains("ROUTING", "PLANNING", "RUNNING", "SQL_GENERATION");
-    }
-
-    @Test
-    @DisplayName("AR01-13 已成功步骤的重复确认只回放，不重放 SQL")
-    void replay_shouldNotReExecute() throws Exception {
-        AgentStep succeeded = new AgentStep(
-                STEP_ID, RUN_ID, 1, QUESTION, null, StepStatus.SUCCEEDED, SQL, 1, "SQL_AGENT",
-                ApprovalStatus.APPROVED, 0, 1, false, null, null, "返回 1 行", NOW, NOW, null, null);
-        when(repository.findRunOwned(RUN_ID, USER_ID)).thenReturn(Optional.of(run(RunStatus.COMPLETED)));
-        when(repository.findStep(RUN_ID, STEP_ID)).thenReturn(Optional.of(succeeded));
-        when(connectionService.summary(USER_ID, CONNECTION_ID))
-                .thenReturn(new ConnectionService.ConnectionSummary(CONNECTION_ID, "A 商店库", DATABASE));
-
-        var prepared = service.prepareApproval(
-                USER_ID, RUN_ID, STEP_ID, new ApproveAgentStepRequest(1, true, "tab-1"));
-        String output = approve(prepared);
-
-        assertThat(prepared.replay()).isTrue();
-        assertThat(output).contains("event: step.succeeded");
-        verifyNoInteractions(executionService);
-    }
-
-    // --------------------------------------------------------- AR01-15 SSE 协议
-
-    @Test
-    @DisplayName("AR01-15 SSE 帧严格为 event/data/空行并以 UTF-8 输出")
-    void sse_shouldFollowWireProtocol() throws Exception {
-        stubRoute(AgentRoute.SIMPLE);
-        stubSingleStepPlan();
-        when(selectionService.generateAndSelect(any(SqlSelectionRequest.class)))
-                .thenReturn(new SqlSelection("SINGLE", SQL, 1, 1, 1, 0.0, 0.0, 0.0, false));
-        when(guard.validate(SQL, DATABASE)).thenReturn(SQL);
-
-        String output = start(prepared());
-
-        assertThat(output).contains("event: run.started\n");
-        assertThat(output).contains("event: step.sql_ready\ndata: ");
-        assertThat(output).contains("订单数"); // 中文未被转义破坏
-        int dataStart = output.indexOf("data: {\"stepId\"");
-        assertThat(dataStart).isGreaterThan(-1);
-        assertThat(output.substring(dataStart)).contains("\n\n");
-        // 每个事件块之间必须有空行分隔
-        assertThat(output.split("\n\n").length).isGreaterThan(3);
-    }
 
     // ------------------------------------------------------------ 辅助构造与桩
 

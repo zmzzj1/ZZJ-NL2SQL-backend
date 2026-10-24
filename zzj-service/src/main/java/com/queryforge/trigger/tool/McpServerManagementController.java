@@ -73,6 +73,9 @@ public class McpServerManagementController {
         String transport = normalizeTransport(request.transportType());
         String argsJson = null;
         String envMetaJson = serializeEnv(request.env());
+        // 未批准命令 / 不受信地址在落库前拒绝，避免留下必然连不上的 ACTIVE 配置。
+        manager.validate(new McpServerEntity(null, userId, request.name().trim(), transport,
+                request.endpoint().trim(), "ACTIVE", argsJson, envMetaJson, null, null));
         Long id = repository.insertOwned(userId, request.name().trim(), transport,
                 request.endpoint().trim(), "ACTIVE", argsJson, envMetaJson);
         McpServerEntity entity = new McpServerEntity(id, userId, request.name().trim(), transport,
@@ -91,6 +94,9 @@ public class McpServerManagementController {
                         "MCP 服务不存在或无权访问"));
         String transport = normalizeTransport(request.transportType());
         String envMetaJson = serializeEnv(request.env());
+        // 配置本身非法（未批准命令/不受信地址）时不改库、不断开既有连接。
+        manager.validate(new McpServerEntity(id, userId, request.name().trim(), transport,
+                request.endpoint().trim(), "ACTIVE", existing.argsJson(), envMetaJson, null, null));
         boolean endpointChanged = !existing.endpoint().equals(request.endpoint().trim())
                 || !existing.transport().equals(transport)
                 || !safeEquals(existing.envMetaJson(), envMetaJson);

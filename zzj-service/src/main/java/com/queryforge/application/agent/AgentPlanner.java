@@ -9,8 +9,10 @@ import com.queryforge.shared.error.ApiException;
 import com.queryforge.shared.error.ErrorCode;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -30,8 +32,14 @@ public class AgentPlanner {
 
     private static final Logger log = LoggerFactory.getLogger(AgentPlanner.class);
     private static final int MAX_OBJECTIVE_CHARS = 300;
-    /** 计划内允许的角色（显式工具路径另有入口，不混入计划）。 */
-    static final List<String> PLAN_ROLES = List.of("DATA_ANALYST", "CODE_ANALYST", "REPORT_ASSISTANT");
+    private static final int MAX_TOOL_NAME_CHARS = 120;
+    private static final int MAX_TOOL_ARGS_CHARS = 4096;
+    /**
+     * 计划内允许的角色。P14-E 允许计划显式携带工具步骤（{@code TOOL_ASSISTANT}），
+     * 但工具身份必须由计划本身给出，服务端不会代为挑选。
+     */
+    static final List<String> PLAN_ROLES =
+            List.of("DATA_ANALYST", "CODE_ANALYST", "REPORT_ASSISTANT", "TOOL_ASSISTANT");
 
     private final LlmClient llmClient;
     private final ObjectMapper objectMapper;
@@ -125,10 +133,17 @@ public class AgentPlanner {
                 continue;
             }
             appeared++;
+            String role = parseRole(node.path("agent").asText(""));
+            AgentPlan.ToolCall tool = parseToolCall(node.path("tool"));
+            if (tool == null && "TOOL_ASSISTANT".equals(role)) {
+                // 角色声明为工具步骤却没有真实工具身份：不猜、不静默降级为 SQL 步骤。
+                throw invalid("计划中的工具步骤缺少可执行工具信息");
+            }
             steps.add(new AgentPlan.Step(
                     truncate(objective, MAX_OBJECTIVE_CHARS),
-                    parseRole(node.path("agent").asText("")),
-                    parseDependsOn(node.path("dependsOn"), appeared)));
+                    role,
+                    parseDependsOn(node.path("dependsOn"), appeared),
+                    tool));
         }
 
         if (!answerable) {
@@ -141,6 +156,44 @@ public class AgentPlanner {
             throw invalid("计划步骤数超过上限 " + properties.maxSteps());
         }
         return new AgentPlan(true, "", List.copyOf(steps));
+    }
+
+    /**
+     * 解析计划内受控工具身份。缺失/空返回 null；名称只做形态与长度校验，
+     * 是否真实注册、是否在 Agent 白名单、是否属于当前用户由执行侧二次核验。
+     */
+    private AgentPlan.ToolCall parseToolCall(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isObject()) {
+            throw invalid("计划中的工具声明必须是对象");
+        }
+        String name = node.path("name").asText("").trim();
+        if (name.isEmpty()) {
+            throw invalid("计划中的工具步骤缺少工具名");
+        }
+        if (name.length() > MAX_TOOL_NAME_CHARS) {
+            throw invalid("计划中的工具名超长");
+        }
+        JsonNode argsNode = node.path("args");
+        Map<String, Object> args = new LinkedHashMap<>();
+        if (!argsNode.isMissingNode() && !argsNode.isNull()) {
+            if (!argsNode.isObject()) {
+                throw invalid("计划中的工具参数必须是 JSON 对象");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> parsed = objectMapper.convertValue(argsNode, Map.class);
+            args.putAll(parsed);
+        }
+        try {
+            if (objectMapper.writeValueAsString(args).length() > MAX_TOOL_ARGS_CHARS) {
+                throw invalid("计划中的工具参数超出长度上限");
+            }
+        } catch (IOException ex) {
+            throw invalid("计划中的工具参数不合法");
+        }
+        return new AgentPlan.ToolCall(name, Map.copyOf(args));
     }
 
     /** 角色必须落在受控枚举内；缺失/空返回 null（服务端推断），未知值拒绝整个计划。 */

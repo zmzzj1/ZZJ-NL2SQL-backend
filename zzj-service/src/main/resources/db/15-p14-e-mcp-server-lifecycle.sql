@@ -3,6 +3,8 @@
 -- 仅追加，不删除旧表/旧列，不另建 mcp_server_config。
 -- 幂等：通过 information_schema 判断列是否已存在。
 
+USE sql_platform;
+
 SET @db = DATABASE();
 
 SET @exist_args = (

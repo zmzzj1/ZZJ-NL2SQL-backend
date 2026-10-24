@@ -30,6 +30,8 @@
     <java.version>21</java.version>
     <jsqlparser.version>5.3</jsqlparser.version>
     <spring-ai.version>1.1.8</spring-ai.version>
+    <!-- P14-ARCH-01：Spring AI Alibaba Graph 运行时（StateGraph/CompiledGraph/RedisSaver）。 -->
+    <spring-ai-alibaba.version>1.1.2.0</spring-ai-alibaba.version>
     <!-- Boot 3.5.x -> Spring Cloud 2025.0.x；Spring Cloud Alibaba 对应 2025.0.0.0（内置 nacos-client 3.0.3）。 -->
     <spring-cloud.version>2025.0.3</spring-cloud.version>
     <spring-cloud-alibaba.version>2025.0.0.0</spring-cloud-alibaba.version>
@@ -59,6 +61,14 @@
         <groupId>org.springframework.cloud</groupId>
         <artifactId>spring-cloud-dependencies</artifactId>
         <version>${spring-cloud.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <!-- P14-ARCH-01：Spring AI Alibaba Graph（六 Agent 主执行链）。版本独立管理，不随 SCA 版本线。 -->
+      <dependency>
+        <groupId>com.alibaba.cloud.ai</groupId>
+        <artifactId>spring-ai-alibaba-bom</artifactId>
+        <version>${spring-ai-alibaba.version}</version>
         <type>pom</type>
         <scope>import</scope>
       </dependency>

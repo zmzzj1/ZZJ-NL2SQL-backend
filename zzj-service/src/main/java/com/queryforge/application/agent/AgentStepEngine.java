@@ -95,6 +95,8 @@ public class AgentStepEngine {
     private static final String ROLE_DATA_ANALYST = "DATA_ANALYST";
     private static final String ROLE_CODE_ANALYST = "CODE_ANALYST";
     private static final String ROLE_REPORT_ASSISTANT = "REPORT_ASSISTANT";
+    /** P14-E：计划中显式携带真实工具身份的工具步骤。 */
+    private static final String ROLE_TOOL_ASSISTANT = "TOOL_ASSISTANT";
     /** 模型返回空串时的简洁能力兜底（仅限空响应，不用于伪造失败）。 */
     private static final String CHITCHAT_FALLBACK =
             "我可以基于你已授权的数据源生成只读 SQL（需你确认后执行）、做多步分析与图表，"
@@ -423,7 +425,7 @@ public class AgentStepEngine {
     /**
      * P14-C：统一推进入口。按持久化角色分发：
      * DATA_ANALYST/SQL_AGENT → 原 SQL 链；CODE_ANALYST → 隔离 Python 分析；
-     * REPORT_ASSISTANT → 基于真实工件生成报告。
+     * REPORT_ASSISTANT → 基于真实工件生成报告；P14-E 的 TOOL_ASSISTANT → 受控工具调用。
      */
     public void advanceReadyStep(PreparedRun run, AgentStep step, AgentStepExecutionInputs inputs, String schema,
                                  SseEventWriter writer, EffectiveRunContext context) throws IOException {
@@ -431,7 +433,84 @@ public class AgentStepEngine {
         switch (role) {
             case ROLE_CODE_ANALYST -> advanceCodeStep(run, step, inputs, writer, context);
             case ROLE_REPORT_ASSISTANT -> advanceReportStep(run, step, inputs, writer, context);
+            case ROLE_TOOL_ASSISTANT -> advanceToolStep(run, step, writer, context);
             default -> advance(run, step, schema, writer, context);
+        }
+    }
+
+    /**
+     * P14-E：计划内工具步骤的受控执行。工具身份与参数只来自该步骤持久化的事实
+     * （{@code agent_steps.tool_name/tool_args}），不接受自由文字或模型回复猜测；
+     * 仍走 Agent 工具白名单 + ToolAssistantAgent（内置注册表 / 当前用户 MCP）+ 参数 schema 校验 + 审计。
+     */
+    private void advanceToolStep(PreparedRun run, AgentStep step, SseEventWriter writer,
+                                 EffectiveRunContext context) throws IOException {
+        AgentRunRepository.StepTool tool = repository.findStepTool(run.runId(), step.id()).orElse(null);
+        if (tool == null || tool.toolName() == null || tool.toolName().isBlank()) {
+            failNonSqlStepAndRun(run, step, ErrorCode.TOOL_INVOCATION_INCOMPLETE,
+                    "计划中的工具步骤缺少可执行工具信息", writer, ROLE_TOOL_ASSISTANT);
+            return;
+        }
+        String toolName = tool.toolName();
+        if (!toolPolicy.allowsStrictly(run.runId(), toolName)) {
+            failNonSqlStepAndRun(run, step, ErrorCode.TOOL_NOT_IN_AGENT_WHITELIST,
+                    "当前 Agent 配置未授权该工具：" + toolName, writer, ROLE_TOOL_ASSISTANT);
+            return;
+        }
+        graphStateService.enter(run.runId(), GraphNode.TOOL_INVOCATION, writer);
+        writer.event("agent.started", new AgentStreamEvents.AgentStarted(
+                run.runId(), ROLE_TOOL_ASSISTANT, TOOL_ACTIVITY));
+        writer.event("step.started", new AgentStreamEvents.StepStarted(step.id(), step.sequence()));
+        // 与显式工具路径同一语义：只有仍为 PENDING 的步骤被领取，重复触发不二次调用。
+        int claimed = repository.startNonSqlStep(step.id());
+        if (claimed == 0) {
+            replayNonSqlStep(run, step, writer, context);
+            return;
+        }
+        ToolInvocation invocation = new ToolInvocation(
+                run.userId(), toolName, run.conversationId(), run.runId(), step.id(), null, null);
+        ToolInvocationResult result;
+        try {
+            result = toolAssistant.invoke(invocation, parseToolArgs(tool.toolArgsJson()), null,
+                    (attempt, diagnostic) -> {
+                        try {
+                            writer.event("tool.repair", new AgentStreamEvents.ToolRepair(
+                                    run.runId(), step.id(), toolName, attempt, diagnostic));
+                        } catch (IOException ignored) {
+                            // 修复元数据为可选信息，发送失败不阻断主流程
+                        }
+                    });
+        } catch (ApiException ex) {
+            failNonSqlStepAndRun(run, step, ex.getErrorCode(), ex.getMessage(), writer, ROLE_TOOL_ASSISTANT);
+            return;
+        } catch (RuntimeException ex) {
+            failNonSqlStepAndRun(run, step, ErrorCode.TOOL_EXECUTION_ERROR, "工具执行失败", writer,
+                    ROLE_TOOL_ASSISTANT);
+            return;
+        }
+        String summary = toolOutputSanitizer.summarize(result);
+        repository.completeNonSqlStep(step.id(), summary);
+        roleRecorder.record(run, ROLE_TOOL_ASSISTANT);
+        writer.event("agent.completed", new AgentStreamEvents.AgentCompleted(
+                run.runId(), ROLE_TOOL_ASSISTANT, TOOL_ACTIVITY, "SUCCESS"));
+        writer.event("step.succeeded", new AgentStreamEvents.StepSucceeded(step.id(), 0, false, summary));
+        writer.event("tool.result", new AgentStreamEvents.ToolResult(
+                run.runId(), step.id(), toolName, "SUCCEEDED", summary));
+        // 下游步骤只能消费受控摘要，工具返回的原文不会进入下游指令。
+        advanceAfterNonSqlStep(run, step, writer, context);
+    }
+
+    /** 计划内工具参数：必须是 JSON object；损坏时不传参猜测，按空对象交给 schema 校验拒绝。 */
+    private static java.util.Map<String, Object> parseToolArgs(String json) {
+        if (json == null || json.isBlank()) {
+            return java.util.Map.of();
+        }
+        try {
+            return OBJECT_MAPPER.readValue(json, new com.fasterxml.jackson.core.type.TypeReference<>() {
+            });
+        } catch (IOException ex) {
+            log.warn("agent_tool_step_args_corrupt length={}", json.length());
+            return java.util.Map.of();
         }
     }
 
@@ -1258,19 +1337,43 @@ public class AgentStepEngine {
         for (int index = 0; index < planSteps.size(); index++) {
             AgentPlan.Step planStep = planSteps.get(index);
             int sequence = index + 1;
-            String role = effectiveRole(planStep, seenDataStep);
+            boolean toolStep = planStep.tool() != null;
+            String role = toolStep ? ROLE_TOOL_ASSISTANT : effectiveRole(planStep, seenDataStep);
             if (ROLE_DATA_ANALYST.equals(role)) {
                 seenDataStep = true;
             }
             Integer dependsOn = planStep.dependsOn() != null
                     ? planStep.dependsOn()
                     : (index == 0 ? null : sequence - 1);
-            repository.insertStep(runId, sequence, planStep.objective(), dependsOn, role);
+            // 工具步骤必须带真实工具身份，否则执行阶段会明确失败而不是猜一个工具。
+            if (toolStep) {
+                repository.insertStep(runId, sequence, planStep.objective(), dependsOn, role,
+                        planStep.tool().name(), serializeToolArgs(planStep.tool().args()));
+            } else {
+                repository.insertStep(runId, sequence, planStep.objective(), dependsOn, role);
+            }
         }
         return repository.findSteps(runId);
     }
 
+    private static String serializeToolArgs(java.util.Map<String, Object> args) {
+        if (args == null || args.isEmpty()) {
+            return null;
+        }
+        try {
+            return OBJECT_MAPPER.writeValueAsString(args);
+        } catch (IOException ex) {
+            // 计划参数已在解析期校验；序列化失败时宁可让该步缺少参数（由 schema 校验拒绝），也不放行。
+            return null;
+        }
+    }
+
     private String effectiveRole(AgentPlan.Step planStep, boolean seenDataStep) {
+        // P14-E：工具步骤自带受控参数，不需要上游真实数据即可执行；
+        // 其余非取数角色仍必须有可访问的上游真实结果。
+        if (planStep.tool() != null) {
+            return ROLE_TOOL_ASSISTANT;
+        }
         if (planStep.agent() != null && !planStep.agent().isBlank()) {
             String role = planStep.agent();
             if (!ROLE_DATA_ANALYST.equals(role) && !seenDataStep) {
@@ -1309,7 +1412,7 @@ public class AgentStepEngine {
                 : message;
     }
 
-    static String digest(QueryResultResponse result) {
+    public static String digest(QueryResultResponse result) {
         if (result.rowCount() == 0) {
             return "返回 0 行";
         }

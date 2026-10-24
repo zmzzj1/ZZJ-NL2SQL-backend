@@ -8,6 +8,13 @@ public enum GraphNode {
     CREATED,
     ROUTING,
     PLANNING,
+    /** P14-ARCH-01：六 Agent 主图节点（真实 StateGraph 节点 id 同名）。 */
+    MANAGER,
+    HITL,
+    DATA_SCIENTIST,
+    CODE_ASSISTANT,
+    TOOL_ASSISTANT,
+    DASHBOARD,
     HITL_GATE,
     WAITING_PLAN_REVIEW,
     CONTEXT_BUILDING,

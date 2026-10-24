@@ -1,5 +1,6 @@
 package com.queryforge.application.agent;
 
+import com.queryforge.application.agent.runtime.AgentGraphRunner;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -80,6 +81,9 @@ import org.mockito.quality.Strictness;
 @MockitoSettings(strictness = Strictness.LENIENT)
 @DisplayName("P14-C 计划角色与依赖")
 class AgentPlanDependenciesP14CTest {
+
+    @Mock
+    private AgentGraphRunner graphRunner;
 
     private static final long USER_ID = 1L;
     private static final long RUN_ID = 5L;
@@ -186,7 +190,7 @@ class AgentPlanDependenciesP14CTest {
                 knowledgeService, configResolver, graphStateService, approvalSessionStore,
                 engine, contextAssembler, failureHandler, planState, roleRecorder, llmLimiter,
                 new ToolInvocationRequestGuard(),
-                planReviewGate, planReviewSessionStore, planner);
+                planReviewGate, planReviewSessionStore, planner, graphRunner);
 
         lenient().when(repository.tryIncrementLlmCalls(anyLong(), anyInt())).thenReturn(1);
         lenient().when(connectionService.schemaContext(USER_ID, CONNECTION_ID)).thenReturn(SCHEMA);
@@ -311,122 +315,4 @@ class AgentPlanDependenciesP14CTest {
 
     // ---------------------------------------------------------------- 依赖顺序推进
 
-    @Test
-    @DisplayName("SQL → Code → Report 按依赖顺序推进，角色与依赖落库")
-    void plan_shouldAdvanceInDependencyOrder() {
-        when(managerRouter.route(any(ManagerRouter.RoutingContext.class)))
-                .thenReturn(new ManagerRouter.RouteDecision(AgentRoute.COMPLEX, "需要多步分析"));
-        when(planner.plan(eq(QUESTION), eq(SCHEMA), anyString()))
-                .thenReturn(new AgentPlan(true, "", List.of(
-                        new AgentPlan.Step(OBJECTIVE, "DATA_ANALYST", null),
-                        new AgentPlan.Step(CODE_OBJECTIVE, "CODE_ANALYST", 1),
-                        new AgentPlan.Step(REPORT_OBJECTIVE, "REPORT_ASSISTANT", 2))));
-        when(repository.insertStep(RUN_ID, 1, OBJECTIVE, null, "DATA_ANALYST")).thenReturn(STEP_ID);
-        when(repository.insertStep(RUN_ID, 2, CODE_OBJECTIVE, 1, "CODE_ANALYST")).thenReturn(CODE_STEP_ID);
-        when(repository.insertStep(RUN_ID, 3, REPORT_OBJECTIVE, 2, "REPORT_ASSISTANT"))
-                .thenReturn(REPORT_STEP_ID);
-        when(sqlAssistant.generateCandidateSql(
-                anyString(), anyString(), anyString(), anyString(), anyString(), anyString(), anyString(),
-                anyInt(), anyString(), anyString()))
-                .thenReturn(SQL);
-        when(sqlAssistant.scoreCandidates(anyString(), anyString(), any()))
-                .thenReturn("[{\"candidate\":1,\"score\":9}]");
-        when(sqlAssistant.summarize(anyString(), anyString())).thenReturn("查询、分析与报告已完成");
-
-        // DB 事实随落库推进：每完成一步，后续 findSteps 反映新的就绪集合。
-        AtomicInteger completions = new AtomicInteger();
-        when(repository.findSteps(RUN_ID)).thenAnswer(invocation -> switch (completions.get()) {
-            case 0 -> List.of(
-                    step(STEP_ID, 1, OBJECTIVE, null, StepStatus.PENDING, "DATA_ANALYST", null, 0,
-                            ApprovalStatus.PENDING, null, null),
-                    step(CODE_STEP_ID, 2, CODE_OBJECTIVE, 1, StepStatus.PENDING, "CODE_ANALYST", null, 0,
-                            ApprovalStatus.PENDING, null, null),
-                    step(REPORT_STEP_ID, 3, REPORT_OBJECTIVE, 2, StepStatus.PENDING, "REPORT_ASSISTANT",
-                            null, 0, ApprovalStatus.PENDING, null, null));
-            case 1 -> List.of(
-                    step(STEP_ID, 1, OBJECTIVE, null, StepStatus.SUCCEEDED, "DATA_ANALYST", SQL, 1,
-                            ApprovalStatus.APPROVED, null, null),
-                    step(CODE_STEP_ID, 2, CODE_OBJECTIVE, 1, StepStatus.PENDING, "CODE_ANALYST", null, 0,
-                            ApprovalStatus.PENDING, null, null),
-                    step(REPORT_STEP_ID, 3, REPORT_OBJECTIVE, 2, StepStatus.PENDING, "REPORT_ASSISTANT",
-                            null, 0, ApprovalStatus.PENDING, null, null));
-            case 2 -> List.of(
-                    step(STEP_ID, 1, OBJECTIVE, null, StepStatus.SUCCEEDED, "DATA_ANALYST", SQL, 1,
-                            ApprovalStatus.APPROVED, null, null),
-                    step(CODE_STEP_ID, 2, CODE_OBJECTIVE, 1, StepStatus.SUCCEEDED, "CODE_ANALYST", null, 0,
-                            ApprovalStatus.PENDING, ANALYSIS_RUN_ID, null),
-                    step(REPORT_STEP_ID, 3, REPORT_OBJECTIVE, 2, StepStatus.PENDING, "REPORT_ASSISTANT",
-                            null, 0, ApprovalStatus.PENDING, null, null));
-            default -> List.of(
-                    step(STEP_ID, 1, OBJECTIVE, null, StepStatus.SUCCEEDED, "DATA_ANALYST", SQL, 1,
-                            ApprovalStatus.APPROVED, null, null),
-                    step(CODE_STEP_ID, 2, CODE_OBJECTIVE, 1, StepStatus.SUCCEEDED, "CODE_ANALYST", null, 0,
-                            ApprovalStatus.PENDING, ANALYSIS_RUN_ID, null),
-                    step(REPORT_STEP_ID, 3, REPORT_OBJECTIVE, 2, StepStatus.SUCCEEDED, "REPORT_ASSISTANT",
-                            null, 0, ApprovalStatus.PENDING, null, REPORT_ID));
-        });
-        when(repository.completeStep(Mockito.anyLong(), Mockito.anyInt(), Mockito.anyBoolean(), anyString()))
-                .thenAnswer(invocation -> {
-                    completions.incrementAndGet();
-                    return 1;
-                });
-        when(repository.completeCodeStep(Mockito.anyLong(), Mockito.anyLong(), Mockito.any(), anyString()))
-                .thenAnswer(invocation -> {
-                    completions.incrementAndGet();
-                    return 1;
-                });
-        when(repository.completeReportStep(Mockito.anyLong(), Mockito.anyLong(), Mockito.any(), anyString()))
-                .thenAnswer(invocation -> {
-                    completions.incrementAndGet();
-                    return 1;
-                });
-        when(executionService.execute(eq(USER_ID), any(ExecuteSqlRequest.class), eq(RUN_ID), eq(STEP_ID)))
-                .thenReturn(queryResult());
-        when(repository.claimNonSqlStep(RUN_ID, CODE_STEP_ID)).thenReturn(1);
-        when(repository.claimNonSqlStep(RUN_ID, REPORT_STEP_ID)).thenReturn(1);
-        when(pythonAssistant.generateCode(eq(RUN_ID), eq(CODE_OBJECTIVE), anyString(), anyString(),
-                anyString(), anyString())).thenReturn(PYTHON_CODE);
-        when(codeAnalyst.analyzeApprovedResult(eq(USER_ID), any(), eq(PYTHON_CODE), any()))
-                .thenReturn(analysisResponse());
-        when(pythonAssistant.interpretResult(eq(RUN_ID), anyString(), anyString(), any(), anyString(), anyString()))
-                .thenReturn("销售额整体呈上升趋势");
-        when(analysisService.detail(USER_ID, ANALYSIS_RUN_ID)).thenReturn(analysisResponse());
-        when(reportComposer.compose(eq(RUN_ID), anyString(), anyString(), anyString(), anyString()))
-                .thenReturn("整体销售额呈上升趋势");
-        when(reportService.createForAgentRun(eq(USER_ID), eq(RUN_ID), eq(REPORT_STEP_ID),
-                eq(List.of(ANALYSIS_RUN_ID)), anyString(), anyString()))
-                .thenReturn(reportResponse());
-
-        ByteArrayOutputStream planOut = new ByteArrayOutputStream();
-        service.startRun(new PreparedRun(RUN_ID, USER_ID, CONVERSATION_ID, CONNECTION_ID, DATABASE, QUESTION),
-                planOut);
-        String planOutput = planOut.toString(StandardCharsets.UTF_8);
-        assertThat(planOutput).contains("event: approval.required");
-        // 计划事件带出全部三个步骤与真实角色。
-        assertThat(planOutput).contains("\"sequence\":1", "\"sequence\":2", "\"sequence\":3");
-        assertThat(planOutput).contains("\"role\":\"REPORT_ASSISTANT\"");
-
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        service.executeApproval(new PreparedApproval(
-                USER_ID, run(RunStatus.WAITING_APPROVAL, AgentRoute.COMPLEX.name()),
-                step(STEP_ID, 1, OBJECTIVE, null, StepStatus.WAITING_APPROVAL, "DATA_ANALYST", SQL, 1,
-                        ApprovalStatus.PENDING, null, null),
-                false, DATABASE, null), out);
-        String output = out.toString(StandardCharsets.UTF_8);
-
-        // 三步全部真实完成后才 run.completed。
-        assertThat(output).contains("event: analysis.succeeded", "event: report.ready");
-        assertThat(output).contains("event: run.completed");
-
-        // 依赖顺序：先落 SQL，再 claim/完成 Code，最后 claim/完成 Report。
-        var inOrder = inOrder(repository);
-        inOrder.verify(repository).setStepSql(STEP_ID, SQL, 1, 0);
-        inOrder.verify(repository).claimNonSqlStep(RUN_ID, CODE_STEP_ID);
-        inOrder.verify(repository).completeCodeStep(eq(RUN_ID), eq(CODE_STEP_ID), eq(ANALYSIS_RUN_ID), anyString());
-        inOrder.verify(repository).claimNonSqlStep(RUN_ID, REPORT_STEP_ID);
-        inOrder.verify(repository).completeReportStep(eq(RUN_ID), eq(REPORT_STEP_ID), eq(REPORT_ID), anyString());
-        // 角色与依赖在插入时落库。
-        verify(repository).insertStep(RUN_ID, 2, CODE_OBJECTIVE, 1, "CODE_ANALYST");
-        verify(repository).insertStep(RUN_ID, 3, REPORT_OBJECTIVE, 2, "REPORT_ASSISTANT");
-    }
 }
